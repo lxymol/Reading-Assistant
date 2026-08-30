@@ -1,86 +1,97 @@
 # Raid
 
-[中文](README.md) | [English](README_EN.md)
+[English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-0.3.0-6b7cff)
+![Version](https://img.shields.io/badge/version-1.0.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
-Raid 是一款面向论文、教材和技术文档的 PDF / 图片 AI 阅读助手。它提供连续 PDF 阅读、文字选择、跨页区域框选、OCR、全文上下文问答，以及可自行配置的 OpenAI Chat Completions 兼容模型。
+Raid is a lightweight, project-oriented AI reader for papers, textbooks, and technical documents. It combines continuous PDF/image reading, text and cross-page area selection, OCR, Markdown notes, persistent annotations, and user-configured models.
 
-> 作者：**xyLee** · [项目仓库](https://github.com/lxymol/Reading-Assistant)
+> Created by **xyLee** · [Repository](https://github.com/lxymol/Reading-Assistant)
 
-## 主要功能
+## Highlights
 
-- 连续 PDF 页面流，支持鼠标滚轮或触控板平滑滚动，以及 60%–300% 缩放。
-- 同时打开多个文件；每个工作区分别保存页码、缩放、选区和多条 AI 对话。
-- 文字选择模式支持复制、就近翻译和发送到 AI；区域选择模式支持跨页框选。
-- 读取 PDF 原生文字；图片和扫描内容可使用中英文 Tesseract OCR。
-- 对选区或全文执行翻译、解释、洞察、总结和自定义提问。
-- 分别配置默认模型、公式与图表理解模型、深度思考模型。
-- 不同文件和不同对话可并行请求 AI，不会相互阻塞。
-- AI 回答支持 GitHub Flavored Markdown、代码块、表格和 KaTeX 数学公式。
-- 日间 / 夜间模式同步作用于界面和文档，并保留上次选择。
-- 内置中文和英文界面；AI 回答及翻译目标语言随应用语言切换。
-- 大型 PDF 按需渲染当前页附近内容，降低内存占用。
-- AI 输入框可从上边界垂直调整高度，并保持最新对话可见；左侧选区与对话区域也可拖动分隔线调整。
-- 关闭选区侧栏后，新增选区不会强制重新展开。
-- 可选的文件记忆会在重新打开同一文件时恢复对话、页码和阅读状态。
-- 可选的用户记忆会学习稳定的背景与回答偏好，并支持在设置中查看、编辑和清空。
+- PDF document reading
+- Text or visual-region selection
+- Colored text and ink annotations
+- Live Markdown notes with pasted images, smart-cropped ink, and Markdown export
+- Dockable component sidebars and detachable floating windows
+- AI Q&A for selections or complete documents, with navigable references in responses and support for multiple user-configured models
+- Importable Skills and language packs, automatic Skill routing, and explicit `/skill-command` selection
+- Multi-project history memory and user-profile management
 
-## 安装
+## Interface preview
 
-Windows 用户可以在 [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases) 下载最新安装程序。安装包不会修改系统环境变量，也不要求另行安装 Node.js。
+![Raid interface overview](docs/images/raid-interface-1.png)
 
-当前版本：`0.3.0`。
+![Raid reading workspace](docs/images/raid-interface-2.png)
 
-## AI 配置
+![Raid tools and annotations](docs/images/raid-interface-3.png)
 
-点击应用右上角的设置按钮，填写兼容接口地址、模型名称和 API Key。应用不预设服务商。
+## AI context strategy
 
-| 配置 | 用途 |
+Raid uses retrieval-augmented context, but it does not require a vector database:
+
+- **Selection mode:** sends a compact page-by-page overview of the complete document, exact content from the selected and neighboring pages, and lexically ranked related chunks from elsewhere in the document. Up to four selected images may be sent when vision is enabled.
+- **Document mode:** sends the page overview plus exact full text for documents within the context limit. Very large documents use query-ranked chunks together with passages distributed across the full document.
+- **Grounding:** answers can contain page markers validated against extracted pages and rendered as compact clickable page references.
+- **Annotations:** visible ink is drawn into selection images; overlapping text annotations are appended to extracted text, and all text annotations can participate in document questions.
+
+This strategy preserves local detail for selections, broad coverage for whole-document questions, and predictable behavior on large files.
+
+## Memory model
+
+Raid has two distinct local memory layers:
+
+- **Project memory:** IndexedDB stores the source file blob, conversations, current page, zoom, reading mode, notes and note images, highlights, and annotations. Deleting a project from **Settings → Memory settings → Project memory** permanently removes the complete record and its related assets.
+- **User memory:** an optional editable profile of stable background and response preferences. When enabled, the configured default model may update this profile from the current request and answer; document source text is not used to learn the profile.
+
+Project memory is document state persistence rather than semantic RAG memory. The AI context retrieval described above is performed from locally extracted document text when a request is made.
+
+## Installation
+
+Download the Windows installer from [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases). Raid does not modify system environment variables and does not require a separate Node.js installation.
+
+Current version: `1.0.0`.
+
+## AI configuration
+
+Open **Settings → Model settings** and enter an API base URL, model name, and API key. Raid does not include provider presets.
+
+| Configuration | Purpose |
 | --- | --- |
-| 默认模型 | 普通文字处理、全文问答和翻译 |
-| 公式与图表理解 | 接收区域裁图，分析公式、图表和示意图 |
-| 深度思考 | 开启右侧“深度思考”后处理纯文字推理任务 |
+| Default model | Text processing, document Q&A, translation, Skill routing, and optional user-memory updates |
+| Vision model | Selected images, formulas, charts, figures, and scanned content |
+| Reasoning model | Text-only reasoning when Deep thinking is enabled |
 
-高级模型的接口地址或 Key 留空时会沿用默认配置。“测试连接”会验证默认模型以及所有已启用的高级模型。接口应兼容：
+Advanced configurations inherit the default endpoint and key when left blank. The question-mark button inside a model field requests the available model list. Compatible endpoints should provide:
 
 - `GET /models`
 - `POST /chat/completions`
 
-图片选区与深度思考同时开启时，应用会明确提示关闭深度思考，避免丢弃图片后误用全文回答。
+## Skills and language packs
 
-## Skill 与语言包
+- Import a folder whose root contains `SKILL.md` from **Settings → Skill settings**. Raid reads its instructions and supported text references.
+- AI can route automatically from Skill metadata, or a message can begin with `/skill-command` to force a Skill.
+- Import a folder containing `language.json` from **Settings → Language settings**. The selected language controls the UI, AI response language, and translation target.
 
-- 在“设置 → 技能设置”中选择一个根目录含 `SKILL.md` 的文件夹。应用会读取 Skill 说明及目录中的文本参考文件。
-- AI 默认根据 Skill 的 `name` 和 `description` 自动选择；也可在聊天开头输入 `/skill-command` 强制指定。
-- 在“设置 → 语言设置”中可导入包含 `language.json` 的文件夹。语言包需包含 `code`、`label`、`aiLanguage` 和 `strings` 字段。
-- 选中语言同时控制界面语言、AI 回答语言和翻译目标语言。
+## Run from source
 
-## 记忆
-
-- “设置 → 记忆设置”可分别开启或关闭文件记忆与用户记忆。
-- 文件记忆存入本机 IndexedDB，仅保存对话和阅读状态，不保存 PDF 或图片文件本体；可以按文件删除或全部清空。
-- 用户记忆保存在本机，提炼过程会调用用户配置的默认 AI 模型。它只用于个性化讲解深度、表达方式和格式。
-- 用户可以直接修改或清空画像；关闭用户记忆后，画像不会发送给 AI，也不会继续自动更新。
-
-## 从源码运行
-
-需要 Node.js 20 或更高版本。
+Node.js 20 or later is required.
 
 ```bash
 npm install
 npm run dev
 ```
 
-浏览器开发服务默认位于 <http://localhost:5173>。启动桌面测试版：
+Start the isolated desktop test build with:
 
 ```bash
 npm run desktop:test
 ```
 
-## 构建
+## Build
 
 ```bash
 npm run lint
@@ -88,22 +99,19 @@ npm run build
 npm run desktop:pack
 ```
 
-Windows NSIS 安装程序输出到 `release-0.3.0/`。发布产物已被 Git 忽略，请通过 GitHub Releases 上传安装包，不要把安装包直接提交到源码历史。
+## Privacy and security
 
-## 隐私与安全
+- PDF rendering, text extraction, OCR, notes, annotations, and project storage run locally.
+- The configured AI service receives data only after an AI action: the selected material, generated document context, recent conversation messages, optional user memory, and up to four visual selections when applicable.
+- Project files and assets are stored locally in IndexedDB so projects can be restored. They are not uploaded unless included in an AI request.
+- API settings remain in the local application data directory and are not included in the repository or installer, but they are not protected by an operating-system credential vault.
 
-- PDF 和图片由 PDF.js 与 Tesseract.js 在本机处理。
-- 只有发起 AI 请求后，相关选区、必要的文档上下文、近期对话和最多 4 张视觉选区才会发送到用户配置的服务。
-- 开启用户记忆后，本次用户要求和助手回答会发送给默认模型以提炼画像；文档原文不会作为画像提炼材料。
-- API 配置保存在应用本机数据目录，不会写入仓库或安装包，但并非操作系统密钥库加密；请只在可信设备使用。
-- `.env` 与本地构建产物已被 Git 忽略。提交前仍建议运行秘密扫描，并确认没有误加入 Key。
+See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
-安全问题请参阅 [SECURITY.md](SECURITY.md)。
+## Contributing
 
-## 贡献
-
-欢迎提交 Issue 和 Pull Request。开始开发前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before starting development.
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。
+Raid is licensed under the [MIT License](LICENSE).
