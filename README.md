@@ -12,7 +12,8 @@ Raid is a lightweight, project-oriented AI reader for papers, textbooks, and tec
 
 ## Highlights
 
-- PDF document reading
+- PDF, image, text, Markdown, source-code, office-document, and EPUB reading through direct rendering or local PDF conversion
+- Drag a file anywhere onto the main window to create a project
 - Text or visual-region selection
 - Colored text and ink annotations
 - Live Markdown notes with pasted images, smart-cropped ink, and Markdown export
@@ -20,6 +21,7 @@ Raid is a lightweight, project-oriented AI reader for papers, textbooks, and tec
 - AI Q&A for selections or complete documents, with navigable references in responses and support for multiple user-configured models
 - Importable Skills and language packs, automatic Skill routing, and explicit `/skill-command` selection
 - Multi-project history memory and user-profile management
+- Split-screen-friendly narrow layout and cache controls
 
 ## Interface preview
 
@@ -52,6 +54,8 @@ Project memory is document state persistence rather than semantic RAG memory. Th
 ## Installation
 
 Download the Windows installer from [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases). Raid does not modify system environment variables and does not require a separate Node.js installation.
+
+Raid stores projects, conversations, notes, annotations, settings, and caches in the `RaidData` folder beside the application executable. Before updating, reinstalling, or uninstalling, use **Settings → Memory settings → Open RaidData**, quit Raid completely, and move the entire folder somewhere safe if you want to preserve it. Restore the folder beside `Raid.exe` before starting the new version.
 
 Current version: `1.0.0`.
 

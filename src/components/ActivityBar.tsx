@@ -29,7 +29,7 @@ export default function ActivityBar({ openPanels, hasSource, dark, annotationAct
     <button className={openPanels.notes ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('notes')} title="笔记"><StickyNote /></button>
     <button className={openPanels.chat ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('chat')} title={labels.conversations}><BrainCircuit /></button>
     <button className={annotationActive ? 'active' : ''} disabled={!hasSource} onClick={onToggleAnnotation} title="批注"><PencilRuler /></button>
-    <label title={labels.openFile}><Plus /><input hidden type="file" accept="application/pdf,image/*" onChange={(event) => event.target.files?.[0] && onOpenFile(event.target.files[0])} /></label>
+    <label title={labels.openFile}><Plus /><input hidden type="file" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) onOpenFile(file) }} /></label>
     <span className="activity-spacer" />
     <button onClick={onToggleTheme} title={dark ? labels.light : labels.dark}>{dark ? <Sun /> : <Moon />}</button>
     <button onClick={onOpenSettings} title={labels.settings}><Settings2 /></button>

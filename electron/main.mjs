@@ -1,9 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
+import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 import { startServer } from '../server/index.mjs'
 
+const execFileAsync = promisify(execFile)
 let localServer = null
 let mainWindow = null
 const dockZoneWindows = new Map()
@@ -13,8 +17,18 @@ const dirname = path.dirname(fileURLToPath(import.meta.url))
 const appIconPath = path.join(dirname, process.platform === 'win32' ? 'app-icon.ico' : 'app-icon.png')
 const dockZoneWidth = 32
 const textFileExtensions = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv', '.tsv', '.tex'])
-const isDevelopmentInstance = process.argv.includes('--development-instance')
-if (isDevelopmentInstance) app.setPath('userData', `${app.getPath('userData')}-development`)
+const packagedTestMarker = path.join(path.dirname(process.execPath), 'TEST_BUILD')
+const isDevelopmentInstance = process.argv.includes('--development-instance') || (app.isPackaged && fs.existsSync(packagedTestMarker))
+const applicationDirectory = app.isPackaged ? path.dirname(process.execPath) : path.resolve(dirname, '..')
+const raidDataPath = path.join(applicationDirectory, isDevelopmentInstance ? 'RaidData-test' : 'RaidData')
+const sessionDataPath = path.join(raidDataPath, 'Chromium')
+const crashDataPath = path.join(raidDataPath, 'Crashpad')
+const conversionCachePath = path.join(raidDataPath, 'ConversionCache')
+const cacheMaintenancePath = path.join(raidDataPath, '.cache-maintenance.json')
+for (const directory of [raidDataPath, sessionDataPath, crashDataPath, conversionCachePath]) fs.mkdirSync(directory, { recursive: true })
+app.setPath('userData', raidDataPath)
+app.setPath('sessionData', sessionDataPath)
+app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
 const internalPort = isDevelopmentInstance ? 18788 : 18787
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
@@ -72,8 +86,151 @@ async function selectImportFolder(kind) {
   }
 }
 
+const convertibleTextExtensions = new Set([
+  '.txt', '.md', '.markdown', '.json', '.jsonl', '.xml', '.html', '.htm', '.css', '.csv', '.tsv', '.log', '.ini', '.cfg', '.conf',
+  '.yaml', '.yml', '.toml', '.tex', '.bib', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.java', '.c', '.h', '.cpp',
+  '.hpp', '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.kts', '.sql', '.sh', '.ps1', '.bat', '.cmd', '.vue', '.svelte',
+])
+const officeParserExtensions = new Set(['.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods', '.rtf', '.epub'])
+
+function readableText(buffer) {
+  const sample = buffer.subarray(0, Math.min(buffer.length, 8192))
+  if (sample.includes(0) && !(sample[0] === 0xff && sample[1] === 0xfe) && !(sample[0] === 0xfe && sample[1] === 0xff)) return null
+  if (sample[0] === 0xff && sample[1] === 0xfe) return buffer.subarray(2).toString('utf16le')
+  if (sample[0] === 0xfe && sample[1] === 0xff) {
+    const swapped = Buffer.from(buffer.subarray(2))
+    for (let index = 0; index + 1 < swapped.length; index += 2) [swapped[index], swapped[index + 1]] = [swapped[index + 1], swapped[index]]
+    return swapped.toString('utf16le')
+  }
+  const value = buffer.toString('utf8')
+  const invalid = (value.match(/\uFFFD/g) || []).length
+  return invalid > Math.max(4, value.length * .01) ? null : value
+}
+
+const escapeHtml = (value) => value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])
+
+async function htmlToPdf(html, workingDirectory) {
+  const htmlPath = path.join(workingDirectory, 'document.html')
+  fs.writeFileSync(htmlPath, html)
+  const printWindow = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  try {
+    await printWindow.loadFile(htmlPath)
+    return await printWindow.webContents.printToPDF({ pageSize: 'A4', printBackground: true, margins: { top: .35, bottom: .35, left: .35, right: .35 } })
+  } finally {
+    if (!printWindow.isDestroyed()) printWindow.destroy()
+  }
+}
+
+async function textToPdf(text, title, workingDirectory) {
+  return htmlToPdf(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>@page{size:A4;margin:16mm 15mm}*{box-sizing:border-box}body{margin:0;color:#181818;background:#fff;font:12px/1.55 "Segoe UI","Microsoft YaHei UI",sans-serif}h1{margin:0 0 14px;font-size:16px;overflow-wrap:anywhere}pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.55 Consolas,"Microsoft YaHei UI",monospace}</style><h1>${escapeHtml(title)}</h1><pre>${escapeHtml(text)}</pre>`, workingDirectory)
+}
+
+async function parsedOfficeToPdf(buffer, extension, workingDirectory) {
+  const { OfficeParser } = await import('./vendor/officeparser.slim.mjs')
+  const ast = await OfficeParser.parseOffice(buffer, { fileType: extension.slice(1), extractAttachments: true, ignoreSlideMasters: true })
+  const { value } = await ast.to('html', { includeImages: true, htmlConfig: { containerWidth: '100%' } })
+  return htmlToPdf(String(value), workingDirectory)
+}
+
+function findLibreOffice() {
+  const roots = [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)']].filter(Boolean)
+  const candidates = roots.map((root) => path.join(root, 'LibreOffice', 'program', 'soffice.exe'))
+  for (const directory of String(process.env.PATH || '').split(path.delimiter)) candidates.push(path.join(directory, process.platform === 'win32' ? 'soffice.exe' : 'soffice'))
+  return candidates.find((candidate) => fs.existsSync(candidate)) || ''
+}
+
+async function officeToPdf(inputPath, workingDirectory) {
+  const executable = findLibreOffice()
+  if (!executable) throw new Error('OFFICE_CONVERTER_UNAVAILABLE')
+  const profilePath = path.join(workingDirectory, 'libreoffice-profile')
+  fs.mkdirSync(profilePath, { recursive: true })
+  await execFileAsync(executable, ['--headless', `-env:UserInstallation=${pathToFileURL(profilePath).href}`, '--convert-to', 'pdf', '--outdir', workingDirectory, inputPath], { windowsHide: true, timeout: 120000, maxBuffer: 2 * 1024 * 1024 })
+  const outputPath = fs.readdirSync(workingDirectory).map((name) => path.join(workingDirectory, name)).find((candidate) => path.extname(candidate).toLowerCase() === '.pdf')
+  if (!outputPath) throw new Error('DOCUMENT_CONVERSION_FAILED')
+  return fs.readFileSync(outputPath)
+}
+
+async function convertDocument(payload) {
+  const safeName = path.basename(String(payload?.name || 'document'))
+  const buffer = Buffer.from(payload?.data || [])
+  if (!buffer.length) return { error: 'EMPTY_FILE' }
+  if (buffer.length > 256 * 1024 * 1024) return { error: 'FILE_TOO_LARGE' }
+  const workingDirectory = path.join(conversionCachePath, randomUUID())
+  fs.mkdirSync(workingDirectory, { recursive: true })
+  try {
+    const extension = path.extname(safeName).toLowerCase()
+    const inputPath = path.join(workingDirectory, safeName || `document${extension || '.bin'}`)
+    fs.writeFileSync(inputPath, buffer)
+    const text = convertibleTextExtensions.has(extension) || String(payload?.type || '').startsWith('text/') ? readableText(buffer) : null
+    let pdfBuffer
+    if (text !== null) pdfBuffer = await textToPdf(text, safeName, workingDirectory)
+    else if (officeParserExtensions.has(extension)) {
+      try { pdfBuffer = await parsedOfficeToPdf(buffer, extension, workingDirectory) }
+      catch { pdfBuffer = await officeToPdf(inputPath, workingDirectory) }
+    }
+    else {
+      try { pdfBuffer = await officeToPdf(inputPath, workingDirectory) }
+      catch (error) {
+        const fallbackText = readableText(buffer)
+        if (fallbackText !== null) pdfBuffer = await textToPdf(fallbackText, safeName, workingDirectory)
+        else throw error
+      }
+    }
+    const baseName = path.basename(safeName, extension) || 'document'
+    return { name: `${baseName}.pdf`, type: 'application/pdf', data: new Uint8Array(pdfBuffer) }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'DOCUMENT_CONVERSION_FAILED' }
+  } finally {
+    if (path.resolve(workingDirectory).startsWith(`${path.resolve(conversionCachePath)}${path.sep}`)) fs.rmSync(workingDirectory, { recursive: true, force: true })
+  }
+}
+
+async function getCacheStats() {
+  const chromiumBytes = await session.defaultSession.getCacheSize().catch(() => 0)
+  let supplementalBytes = 0
+  const visit = (directory) => {
+    if (!fs.existsSync(directory)) return
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name)
+      if (entry.isDirectory()) visit(absolutePath)
+      else if (entry.isFile()) supplementalBytes += fs.statSync(absolutePath).size
+    }
+  }
+  visit(conversionCachePath)
+  visit(path.join(raidDataPath, 'Code Cache'))
+  return { bytes: chromiumBytes + supplementalBytes, path: raidDataPath }
+}
+
+async function clearAppCaches() {
+  const before = await getCacheStats()
+  await session.defaultSession.clearCache()
+  await session.defaultSession.clearCodeCaches({})
+  fs.rmSync(conversionCachePath, { recursive: true, force: true })
+  fs.mkdirSync(conversionCachePath, { recursive: true })
+  fs.writeFileSync(cacheMaintenancePath, JSON.stringify({ lastCleared: Date.now() }))
+  return { removedBytes: before.bytes, ...(await getCacheStats()) }
+}
+
+async function maintainCaches() {
+  fs.rmSync(conversionCachePath, { recursive: true, force: true })
+  fs.mkdirSync(conversionCachePath, { recursive: true })
+  let lastCleared = 0
+  try { lastCleared = Number(JSON.parse(fs.readFileSync(cacheMaintenancePath, 'utf8')).lastCleared) || 0 } catch { /* first run */ }
+  const { bytes } = await getCacheStats()
+  if (bytes >= 256 * 1024 * 1024 || Date.now() - lastCleared >= 7 * 24 * 60 * 60 * 1000) await clearAppCaches()
+}
+
 ipcMain.handle('reading-assistant:select-skill-folder', () => selectImportFolder('skill'))
 ipcMain.handle('reading-assistant:select-language-folder', () => selectImportFolder('language'))
+ipcMain.handle('reading-assistant:convert-document', (_event, payload) => convertDocument(payload))
+ipcMain.handle('reading-assistant:get-cache-stats', () => getCacheStats())
+ipcMain.handle('reading-assistant:clear-caches', () => clearAppCaches())
+ipcMain.handle('reading-assistant:open-user-data-folder', async () => {
+  const userDataPath = app.getPath('userData')
+  fs.mkdirSync(userDataPath, { recursive: true })
+  const error = await shell.openPath(userDataPath)
+  return error ? { error } : { path: userDataPath }
+})
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)
   return mainWindow && panelWindow && !panelWindow.isDestroyed() && panelWindow.getParentWindow() === mainWindow ? panelWindow : null
@@ -192,8 +349,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1500,
     height: 940,
-    minWidth: 980,
-    minHeight: 640,
+    minWidth: 520,
+    minHeight: 480,
     show: true,
     title: isDevelopmentInstance ? 'Raid · Test' : 'Raid',
     backgroundColor: '#171a20',
@@ -258,7 +415,9 @@ if (!hasSingleInstanceLock) {
   })
   app.whenReady().then(() => {
     logStartup('Electron ready')
-    return createWindow()
+    return maintainCaches()
+      .catch((error) => logStartup(`Cache maintenance failed: ${error instanceof Error ? error.message : String(error)}`))
+      .then(() => createWindow())
   }).catch((error) => {
     logStartup(`Startup failed: ${error instanceof Error ? error.stack || error.message : String(error)}`)
     console.error(error)

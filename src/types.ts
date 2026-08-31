@@ -95,6 +95,13 @@ export type FolderImportResult = {
   error?: string
 }
 
+export type DocumentConversionResult = {
+  name?: string
+  type?: string
+  data?: Uint8Array
+  error?: string
+}
+
 export type AiAction = 'translate' | 'explain' | 'insight' | 'summarize' | 'custom'
 
 export type CapturedSelection = SelectionResult & {
@@ -140,6 +147,10 @@ declare global {
     readingAssistant?: {
       selectSkillFolder: () => Promise<FolderImportResult>
       selectLanguageFolder: () => Promise<FolderImportResult>
+      openUserDataFolder: () => Promise<{ path?: string; error?: string }>
+      convertDocument: (payload: { name: string; type: string; lastModified: number; data: ArrayBuffer }) => Promise<DocumentConversionResult>
+      getCacheStats: () => Promise<{ bytes: number; path: string }>
+      clearCaches: () => Promise<{ removedBytes: number; bytes: number; path: string }>
       movePanelWindow: (id: string, x: number, y: number) => void
       preparePanelDrag: () => void
       setPanelDragging: (active: boolean) => void

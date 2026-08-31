@@ -79,7 +79,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const saved = Number(localStorage.getItem('reading-assistant-selection-split'))
     return Number.isFinite(saved) && saved >= .15 && saved <= .85 ? saved : .46
   })
-  const [busy, setBusy] = useState<'ocr' | 'extract' | ''>('')
+  const [busy, setBusy] = useState<'ocr' | 'extract' | 'convert' | ''>('')
+  const [fileDragActive, setFileDragActive] = useState(false)
   const [aiTasks, setAiTasks] = useState<Set<string>>(() => new Set())
   const [progress, setProgress] = useState('')
   const [error, setError] = useState('')
@@ -105,6 +106,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const selectionReady = Boolean(selectedText || hasVisualSelection)
   const workerRef = useRef<OcrWorker | null>(null)
   const workerPromiseRef = useRef<Promise<OcrWorker> | null>(null)
+  const fileDragDepthRef = useRef(0)
   const showOcrProgressRef = useRef(false)
   const resultsEndRef = useRef<HTMLDivElement>(null)
   const panelScrollRef = useRef<HTMLDivElement>(null)
@@ -384,11 +386,32 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }
 
   const openFile = async (file: File) => {
-    if (!(file.type === 'application/pdf' || file.type.startsWith('image/'))) {
-      setError(t('invalidFile'))
-      return
+    let readableFile = file
+    const lowerName = file.name.toLocaleLowerCase()
+    const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf')
+    const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg|avif)$/i.test(lowerName)
+    if (!isPdf && !isImage) {
+      if (!window.readingAssistant) { setError(t('desktopConversionOnly')); return }
+      setBusy('convert'); setProgress(t('convertingDocument')); setError('')
+      try {
+        const result = await window.readingAssistant.convertDocument({ name: file.name, type: file.type, lastModified: file.lastModified, data: await file.arrayBuffer() })
+        if (result.error || !result.data) {
+          const message = result.error === 'OFFICE_CONVERTER_UNAVAILABLE' ? t('officeConverterUnavailable')
+            : result.error === 'FILE_TOO_LARGE' ? t('fileTooLarge')
+              : result.error === 'EMPTY_FILE' ? t('emptyFile') : t('conversionFailed')
+          throw new Error(message)
+        }
+        const convertedBuffer = new ArrayBuffer(result.data.byteLength)
+        new Uint8Array(convertedBuffer).set(result.data)
+        readableFile = new File([convertedBuffer], file.name, { type: result.type || 'application/pdf', lastModified: file.lastModified })
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : t('conversionFailed'))
+        return
+      } finally {
+        setBusy(''); setProgress('')
+      }
     }
-    const memoryKey = getFileMemoryId(file)
+    const memoryKey = getFileMemoryId(readableFile)
     const alreadyOpen = workAreas.find((area) => area.memoryKey === memoryKey)
     if (alreadyOpen) {
       openWorkArea(alreadyOpen.id)
@@ -405,7 +428,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       ? remembered!.activeConversationId
       : restoredConversations[0]?.id || ''
     const next: WorkArea = {
-      id, memoryKey, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(file), file },
+      id, memoryKey, source: { name: readableFile.name, kind: readableFile.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(readableFile), file: readableFile },
       pdf: null, documentText: remembered?.documentTextVersion === 2 ? remembered.documentText || '' : '', selectedText: '', selections: [], conversations: restoredConversations, activeConversationId: restoredActiveConversationId, customPrompt: '', zoom: remembered?.zoom || 1,
       currentPage: remembered?.currentPage || 1, areaSelectionEnabled: remembered?.areaSelectionEnabled || false, scope: remembered?.scope || 'selection', note: remembered?.note || '', noteAssets: remembered?.noteAssets || {}, highlights: remembered?.highlights || [], annotations: remembered?.annotations || [],
     }
@@ -484,6 +507,44 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
     window.addEventListener('paste', paste)
     return () => window.removeEventListener('paste', paste)
+  })
+
+  useEffect(() => {
+    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types || []).includes('Files')
+    const enter = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      fileDragDepthRef.current += 1
+      setFileDragActive(true)
+    }
+    const over = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    }
+    const leave = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
+      if (!fileDragDepthRef.current) setFileDragActive(false)
+    }
+    const drop = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      fileDragDepthRef.current = 0
+      setFileDragActive(false)
+      const file = event.dataTransfer?.files?.[0]
+      if (file) void openFile(file)
+    }
+    window.addEventListener('dragenter', enter)
+    window.addEventListener('dragover', over)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragenter', enter)
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', drop)
+    }
   })
 
   const onPdfReady = useCallback((document: PDFDocumentProxy) => setPdf(document), [])
@@ -1023,6 +1084,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   return (
     <div className="app-shell modern-shell">
+      {fileDragActive && <div className="file-drop-overlay"><div><FolderOpen size={32} /><strong>{t('dropToOpen')}</strong><small>{t('dropToOpenHelp')}</small></div></div>}
+      {busy === 'convert' && <div className="conversion-overlay"><LoaderCircle className="spin" size={24} /><strong>{progress || t('convertingDocument')}</strong></div>}
       <ActivityBar
         openPanels={{ projects: panelLayouts.projects.open, selection: panelLayouts.selection.open, notes: panelLayouts.notes.open, chat: panelLayouts.chat.open }}
         hasSource={Boolean(source)}
