@@ -147,10 +147,14 @@ declare global {
     readingAssistant?: {
       selectSkillFolder: () => Promise<FolderImportResult>
       selectLanguageFolder: () => Promise<FolderImportResult>
-      openUserDataFolder: () => Promise<{ path?: string; error?: string }>
       convertDocument: (payload: { name: string; type: string; lastModified: number; data: ArrayBuffer }) => Promise<DocumentConversionResult>
-      getCacheStats: () => Promise<{ bytes: number; path: string }>
-      clearCaches: () => Promise<{ removedBytes: number; bytes: number; path: string }>
+      listProjectMemories: () => Promise<Array<Record<string, unknown> & { fileData?: Uint8Array }>>
+      getProjectMemory: (id: string) => Promise<(Record<string, unknown> & { fileData?: Uint8Array }) | null>
+      saveProjectMemory: (record: Record<string, unknown> & { fileData?: ArrayBuffer }) => Promise<boolean>
+      deleteProjectMemory: (id: string) => Promise<void>
+      listProjectMemorySummaries: () => Promise<Array<Record<string, unknown>>>
+      getProjectMigrationStatus: () => Promise<boolean>
+      completeProjectMigration: () => Promise<boolean>
       movePanelWindow: (id: string, x: number, y: number) => void
       preparePanelDrag: () => void
       setPanelDragging: (active: boolean) => void

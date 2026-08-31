@@ -21,7 +21,7 @@ Raid is a lightweight, project-oriented AI reader for papers, textbooks, and tec
 - AI Q&A for selections or complete documents, with navigable references in responses and support for multiple user-configured models
 - Importable Skills and language packs, automatic Skill routing, and explicit `/skill-command` selection
 - Multi-project history memory and user-profile management
-- Split-screen-friendly narrow layout and cache controls
+- Split-screen-friendly narrow layout and drag-to-reorder navigation tools
 
 ## Interface preview
 
@@ -37,7 +37,7 @@ Raid uses retrieval-augmented context, but it does not require a vector database
 
 - **Selection mode:** sends a compact page-by-page overview of the complete document, exact content from the selected and neighboring pages, and lexically ranked related chunks from elsewhere in the document. Up to four selected images may be sent when vision is enabled.
 - **Document mode:** sends the page overview plus exact full text for documents within the context limit. Very large documents use query-ranked chunks together with passages distributed across the full document.
-- **Grounding:** answers can contain page markers validated against extracted pages and rendered as compact clickable page references.
+- **Grounding:** PDF text is reconstructed into lines, columns, and paragraphs from layout coordinates. Answers show numeric-only references that jump to and highlight the source paragraph.
 - **Annotations:** visible ink is drawn into selection images; overlapping text annotations are appended to extracted text, and all text annotations can participate in document questions.
 
 This strategy preserves local detail for selections, broad coverage for whole-document questions, and predictable behavior on large files.
@@ -46,7 +46,7 @@ This strategy preserves local detail for selections, broad coverage for whole-do
 
 Raid has two distinct local memory layers:
 
-- **Project memory:** IndexedDB stores the source file blob, conversations, current page, zoom, reading mode, notes and note images, highlights, and annotations. Deleting a project from **Settings → Memory settings → Project memory** permanently removes the complete record and its related assets.
+- **Project memory:** versioned records under `RaidData/Data/projects` store the source file, conversations, current page, zoom, reading mode, notes and note images, highlights, and annotations. Legacy IndexedDB projects migrate automatically. Deleting a project from **Settings → Memory settings → Project memory** permanently removes the complete record and its related assets.
 - **User memory:** an optional editable profile of stable background and response preferences. When enabled, the configured default model may update this profile from the current request and answer; document source text is not used to learn the profile.
 
 Project memory is document state persistence rather than semantic RAG memory. The AI context retrieval described above is performed from locally extracted document text when a request is made.
@@ -55,7 +55,7 @@ Project memory is document state persistence rather than semantic RAG memory. Th
 
 Download the Windows installer from [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases). Raid does not modify system environment variables and does not require a separate Node.js installation.
 
-Raid stores projects, conversations, notes, annotations, settings, and caches in the `RaidData` folder beside the application executable. Before updating, reinstalling, or uninstalling, use **Settings → Memory settings → Open RaidData**, quit Raid completely, and move the entire folder somewhere safe if you want to preserve it. Restore the folder beside `Raid.exe` before starting the new version.
+Raid keeps its data in the `RaidData` folder beside the executable instead of accumulating project files in the Windows user profile on drive C. `Data` contains versioned durable projects, `Runtime` contains small runtime preferences, and `Cache` is disposable. Cache data is cleared on every normal exit and cleaned again on startup after an interrupted session.
 
 Current version: `1.0.0`.
 

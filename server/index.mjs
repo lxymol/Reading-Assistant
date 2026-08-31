@@ -26,6 +26,10 @@ function parseDocumentPages(text) {
   return matches.map((match, index) => ({ page: Number(match[1]), text: source.slice((match.index || 0) + match[0].length, matches[index + 1]?.index ?? source.length).trim() }))
 }
 
+function parseDocumentReferences(text) {
+  return [...String(text || '').matchAll(/\[\[REF:(\d+)\|PAGE:(\d+)\|RECT:[^\]]+\]\]\s*([^\n]*)/g)].map((match) => ({ id: Number(match[1]), page: Number(match[2]), text: match[3].trim() }))
+}
+
 function queryTerms(value) {
   const normalized = String(value || '').toLocaleLowerCase()
   const words = normalized.match(/[a-z0-9][a-z0-9_-]{2,35}/g) || []
@@ -93,17 +97,24 @@ function buildDocumentContext(text, mode, anchorPages, query, action) {
 function groundPageTags(content, documentText, anchorPages) {
   const pages = parseDocumentPages(documentText)
   const pageMap = new Map(pages.map((item) => [item.page, item.text]))
+  const references = parseDocumentReferences(documentText)
+  const referenceMap = new Map(references.map((item) => [item.id, item]))
+  const firstReferenceOnPage = new Map()
+  references.forEach((item) => { if (!firstReferenceOnPage.has(item.page)) firstReferenceOnPage.set(item.page, item.id) })
   let grounded = String(content)
-    .replace(/\[\[SOURCE:(\d+)\|[\s\S]*?\]\]/g, (_tag, pageValue) => pageMap.has(Number(pageValue)) ? `[[PAGE:${Number(pageValue)}]]` : '')
-    .replace(/\[\[PAGE:(\d+)\]\]/g, (_tag, pageValue) => pageMap.has(Number(pageValue)) ? `[[PAGE:${Number(pageValue)}]]` : '')
-  if (grounded.includes('[[PAGE:') || !pages.length) return grounded
+    .replace(/\[\[REF:(\d+)\|PAGE:\d+\|RECT:[^\]]+\]\]/g, (_tag, referenceValue) => referenceMap.has(Number(referenceValue)) ? `[[REF:${Number(referenceValue)}]]` : '')
+    .replace(/\[\[REF:(\d+)\]\]/g, (_tag, referenceValue) => referenceMap.has(Number(referenceValue)) ? `[[REF:${Number(referenceValue)}]]` : '')
+    .replace(/\[\[SOURCE:(\d+)\|[\s\S]*?\]\]/g, (_tag, pageValue) => firstReferenceOnPage.has(Number(pageValue)) ? `[[REF:${firstReferenceOnPage.get(Number(pageValue))}]]` : pageMap.has(Number(pageValue)) ? `[[PAGE:${Number(pageValue)}]]` : '')
+    .replace(/\[\[PAGE:(\d+)\]\]/g, (_tag, pageValue) => firstReferenceOnPage.has(Number(pageValue)) ? `[[REF:${firstReferenceOnPage.get(Number(pageValue))}]]` : pageMap.has(Number(pageValue)) ? `[[PAGE:${Number(pageValue)}]]` : '')
+  if (grounded.includes('[[REF:') || grounded.includes('[[PAGE:') || !pages.length) return grounded
   const requestedPages = new Set((Array.isArray(anchorPages) ? anchorPages : []).map(Number))
   const normalizedAnswer = grounded.toLocaleLowerCase()
   const terms = queryTerms(normalizedAnswer)
   const ranked = pages.map((item) => ({ ...item, score: terms.reduce((sum, term) => sum + (item.text.toLocaleLowerCase().includes(term) ? term.length : 0), 0), requested: requestedPages.has(item.page) ? 30 : 0 })).sort((a, b) => (b.score + b.requested) - (a.score + a.requested))
   const source = ranked[0]
   if (!source?.text) return grounded
-  return `${grounded}\n\n[[PAGE:${source.page}]]`
+  const referenceId = firstReferenceOnPage.get(source.page)
+  return `${grounded}\n\n${referenceId ? `[[REF:${referenceId}]]` : `[[PAGE:${source.page}]]`}`
 }
 
 function sanitizeSkills(value) {
@@ -272,7 +283,7 @@ app.post('/api/ai', async (req, res) => {
   const target = selectedText ? `【当前选中内容】\n${selectedText}` : useVision ? '【当前选中内容】请分析附带的视觉选区。' : '请处理全文。'
   const singleWord = action === 'translate' && /^[A-Za-z][A-Za-z'-]*$/.test(String(selectedText).trim())
   const taskPrompt = action === 'translate' ? `准确翻译目标内容为${responseLanguage}。保留术语、数字和逻辑层次；先给译文，必要时补充极简术语说明。${singleWord ? '目标是单个英文单词：第一行必须将原词、标准美式 IPA 和主要词义写在同一行；不要单独设置音标段落，也不要出现“标准美音音标”“美式音标”或“音标”等说明标签。' : ''}` : (taskPrompts[action] || taskPrompts.custom)
-  let userPrompt = `${taskPrompt}\n【回答语言】${responseLanguage}\n${instruction ? `【用户要求】\n${instruction}\n` : ''}${target}${context}\n\n【页码标注规则】回答中凡是提及与文中关系密切的事实、观点或结论，只需紧跟页码标注，格式严格为 [[PAGE:页码]]。页码必须来自材料中的页码标记；不要附带引文，不要写 Source/来源，不要编造页码。`
+  let userPrompt = `${taskPrompt}\n【回答语言】${responseLanguage}\n${instruction ? `【用户要求】\n${instruction}\n` : ''}${target}${context}\n\n【引用标注规则】材料段落以 [[REF:编号|PAGE:页码|RECT:位置]] 开头。回答中凡是提及与原文密切相关的事实、观点或结论，只需紧跟 [[REF:编号]]；编号必须来自实际支持该说法的材料段落。不要输出页码、引文、Source/来源或位置数据，不要编造编号。若材料没有 REF 标记，才使用 [[PAGE:页码]]。`
 
   try {
     let resolvedMode = useReasoning ? 'reasoning' : 'default'

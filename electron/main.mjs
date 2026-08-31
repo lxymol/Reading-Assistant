@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -10,6 +10,8 @@ import { startServer } from '../server/index.mjs'
 const execFileAsync = promisify(execFile)
 let localServer = null
 let mainWindow = null
+let exitCacheCleanupStarted = false
+let exitCacheCleanupComplete = false
 const dockZoneWindows = new Map()
 const panelDragBounds = new WeakMap()
 const panelPreparedBounds = new WeakMap()
@@ -21,12 +23,28 @@ const packagedTestMarker = path.join(path.dirname(process.execPath), 'TEST_BUILD
 const isDevelopmentInstance = process.argv.includes('--development-instance') || (app.isPackaged && fs.existsSync(packagedTestMarker))
 const applicationDirectory = app.isPackaged ? path.dirname(process.execPath) : path.resolve(dirname, '..')
 const raidDataPath = path.join(applicationDirectory, isDevelopmentInstance ? 'RaidData-test' : 'RaidData')
-const sessionDataPath = path.join(raidDataPath, 'Chromium')
-const crashDataPath = path.join(raidDataPath, 'Crashpad')
-const conversionCachePath = path.join(raidDataPath, 'ConversionCache')
-const cacheMaintenancePath = path.join(raidDataPath, '.cache-maintenance.json')
-for (const directory of [raidDataPath, sessionDataPath, crashDataPath, conversionCachePath]) fs.mkdirSync(directory, { recursive: true })
-app.setPath('userData', raidDataPath)
+const runtimeDataPath = path.join(raidDataPath, 'Runtime')
+const durableDataPath = path.join(raidDataPath, 'Data')
+const projectsDataPath = path.join(durableDataPath, 'projects')
+const cacheDataPath = path.join(raidDataPath, 'Cache')
+const sessionDataPath = path.join(runtimeDataPath, 'Chromium')
+const crashDataPath = path.join(cacheDataPath, 'Crashpad')
+const conversionCachePath = path.join(cacheDataPath, 'Conversion')
+const dataManifestPath = path.join(raidDataPath, 'manifest.json')
+const storageSchemaVersion = 1
+
+function moveLegacyRuntimeEntry(name, destination = path.join(runtimeDataPath, name)) {
+  const source = path.join(raidDataPath, name)
+  if (!fs.existsSync(source) || fs.existsSync(destination)) return
+  fs.mkdirSync(path.dirname(destination), { recursive: true })
+  try { fs.renameSync(source, destination) } catch { /* Keep the readable legacy copy when migration is blocked. */ }
+}
+
+fs.mkdirSync(runtimeDataPath, { recursive: true })
+moveLegacyRuntimeEntry('Chromium', sessionDataPath)
+moveLegacyRuntimeEntry('Code Cache')
+for (const directory of [raidDataPath, runtimeDataPath, durableDataPath, projectsDataPath, cacheDataPath, sessionDataPath, crashDataPath, conversionCachePath]) fs.mkdirSync(directory, { recursive: true })
+app.setPath('userData', runtimeDataPath)
 app.setPath('sessionData', sessionDataPath)
 app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
@@ -185,6 +203,84 @@ async function convertDocument(payload) {
   }
 }
 
+function readDataManifest() {
+  let manifest = null
+  if (fs.existsSync(dataManifestPath)) {
+    try { manifest = JSON.parse(fs.readFileSync(dataManifestPath, 'utf8')) }
+    catch { throw new Error('RAID_DATA_MANIFEST_INVALID') }
+  }
+  if (Number(manifest?.schemaVersion || 0) > storageSchemaVersion) throw new Error('RAID_DATA_FROM_NEWER_VERSION')
+  return manifest && typeof manifest === 'object' ? manifest : { schemaVersion: storageSchemaVersion, createdAt: Date.now(), legacyProjectMigrationComplete: false }
+}
+
+function writeDataManifest(update = {}) {
+  const manifest = { ...readDataManifest(), ...update, schemaVersion: storageSchemaVersion, appVersion: app.getVersion(), updatedAt: Date.now() }
+  const temporaryPath = `${dataManifestPath}.${process.pid}.${randomUUID()}.tmp`
+  fs.writeFileSync(temporaryPath, JSON.stringify(manifest, null, 2))
+  fs.renameSync(temporaryPath, dataManifestPath)
+  return manifest
+}
+
+function projectDataDirectory(id) {
+  const key = createHash('sha256').update(String(id)).digest('hex')
+  const directory = path.join(projectsDataPath, key)
+  if (!path.resolve(directory).startsWith(`${path.resolve(projectsDataPath)}${path.sep}`)) throw new Error('INVALID_PROJECT_ID')
+  return directory
+}
+
+function writeJsonAtomically(filePath, value) {
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
+  fs.writeFileSync(temporaryPath, JSON.stringify(value))
+  fs.renameSync(temporaryPath, filePath)
+}
+
+function readProjectRecord(directory, includeSource = true) {
+  const metadataPath = path.join(directory, 'project.json')
+  if (!fs.existsSync(metadataPath)) return null
+  const stored = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+  if (Number(stored.schemaVersion || 0) > storageSchemaVersion) throw new Error('PROJECT_DATA_FROM_NEWER_VERSION')
+  const { schemaVersion: _schemaVersion, hasSource: _hasSource, ...record } = stored
+  const sourcePath = path.join(directory, 'source.bin')
+  return includeSource && fs.existsSync(sourcePath) ? { ...record, fileData: new Uint8Array(fs.readFileSync(sourcePath)) } : record
+}
+
+function listProjectRecords(includeSource = true) {
+  const records = []
+  for (const entry of fs.readdirSync(projectsDataPath, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    try {
+      const record = readProjectRecord(path.join(projectsDataPath, entry.name), includeSource)
+      if (record) records.push(record)
+    } catch (error) {
+      logStartup(`Skipped unreadable project ${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return records.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+}
+
+function saveProjectRecord(payload) {
+  if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string') throw new Error('INVALID_PROJECT_RECORD')
+  const directory = projectDataDirectory(payload.id)
+  fs.mkdirSync(directory, { recursive: true })
+  const { fileData, ...record } = payload
+  const sourcePath = path.join(directory, 'source.bin')
+  if (fileData != null) {
+    const temporarySource = `${sourcePath}.${process.pid}.${randomUUID()}.tmp`
+    fs.writeFileSync(temporarySource, Buffer.from(fileData))
+    fs.renameSync(temporarySource, sourcePath)
+  }
+  writeJsonAtomically(path.join(directory, 'project.json'), { schemaVersion: storageSchemaVersion, hasSource: fs.existsSync(sourcePath), ...record })
+  writeDataManifest()
+  return true
+}
+
+function deleteProjectRecord(id) {
+  fs.rmSync(projectDataDirectory(id), { recursive: true, force: true })
+  writeDataManifest()
+}
+
+writeDataManifest()
+
 async function getCacheStats() {
   const chromiumBytes = await session.defaultSession.getCacheSize().catch(() => 0)
   let supplementalBytes = 0
@@ -197,7 +293,7 @@ async function getCacheStats() {
     }
   }
   visit(conversionCachePath)
-  visit(path.join(raidDataPath, 'Code Cache'))
+  visit(path.join(runtimeDataPath, 'Code Cache'))
   return { bytes: chromiumBytes + supplementalBytes, path: raidDataPath }
 }
 
@@ -207,30 +303,25 @@ async function clearAppCaches() {
   await session.defaultSession.clearCodeCaches({})
   fs.rmSync(conversionCachePath, { recursive: true, force: true })
   fs.mkdirSync(conversionCachePath, { recursive: true })
-  fs.writeFileSync(cacheMaintenancePath, JSON.stringify({ lastCleared: Date.now() }))
   return { removedBytes: before.bytes, ...(await getCacheStats()) }
 }
 
 async function maintainCaches() {
   fs.rmSync(conversionCachePath, { recursive: true, force: true })
   fs.mkdirSync(conversionCachePath, { recursive: true })
-  let lastCleared = 0
-  try { lastCleared = Number(JSON.parse(fs.readFileSync(cacheMaintenancePath, 'utf8')).lastCleared) || 0 } catch { /* first run */ }
-  const { bytes } = await getCacheStats()
-  if (bytes >= 256 * 1024 * 1024 || Date.now() - lastCleared >= 7 * 24 * 60 * 60 * 1000) await clearAppCaches()
+  await clearAppCaches()
 }
 
 ipcMain.handle('reading-assistant:select-skill-folder', () => selectImportFolder('skill'))
 ipcMain.handle('reading-assistant:select-language-folder', () => selectImportFolder('language'))
 ipcMain.handle('reading-assistant:convert-document', (_event, payload) => convertDocument(payload))
-ipcMain.handle('reading-assistant:get-cache-stats', () => getCacheStats())
-ipcMain.handle('reading-assistant:clear-caches', () => clearAppCaches())
-ipcMain.handle('reading-assistant:open-user-data-folder', async () => {
-  const userDataPath = app.getPath('userData')
-  fs.mkdirSync(userDataPath, { recursive: true })
-  const error = await shell.openPath(userDataPath)
-  return error ? { error } : { path: userDataPath }
-})
+ipcMain.handle('reading-assistant:list-project-memories', () => listProjectRecords(true))
+ipcMain.handle('reading-assistant:get-project-memory', (_event, id) => readProjectRecord(projectDataDirectory(id), true))
+ipcMain.handle('reading-assistant:save-project-memory', (_event, payload) => saveProjectRecord(payload))
+ipcMain.handle('reading-assistant:delete-project-memory', (_event, id) => deleteProjectRecord(id))
+ipcMain.handle('reading-assistant:list-project-memory-summaries', () => listProjectRecords(false).map((record) => ({ id: record.id, fileName: record.fileName, fileSize: record.fileSize, fileType: record.fileType, lastModified: record.lastModified, updatedAt: record.updatedAt, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : 0 })))
+ipcMain.handle('reading-assistant:get-project-migration-status', () => Boolean(readDataManifest().legacyProjectMigrationComplete))
+ipcMain.handle('reading-assistant:complete-project-migration', () => { writeDataManifest({ legacyProjectMigrationComplete: true }); return true })
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)
   return mainWindow && panelWindow && !panelWindow.isDestroyed() && panelWindow.getParentWindow() === mainWindow ? panelWindow : null
@@ -433,8 +524,15 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   setDockZones(false)
   localServer?.close()
   localServer = null
+  if (exitCacheCleanupComplete || exitCacheCleanupStarted) return
+  event.preventDefault()
+  exitCacheCleanupStarted = true
+  void clearAppCaches().catch((error) => logStartup(`Exit cache cleanup failed: ${error instanceof Error ? error.message : String(error)}`)).finally(() => {
+    exitCacheCleanupComplete = true
+    app.quit()
+  })
 })

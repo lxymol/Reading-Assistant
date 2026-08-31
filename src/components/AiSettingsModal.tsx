@@ -1,5 +1,5 @@
 import { Bot, BrainCircuit, CheckCircle2, CircleHelp, Database, Eye, EyeOff, FolderOpen, Languages, LoaderCircle, Puzzle, Settings2, Trash2, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { LanguagePack } from '../i18n'
 import { useI18n, type AppLanguage } from '../i18n'
 import type { AiConfig, ImportedSkill, MemorySettings } from '../types'
@@ -40,15 +40,6 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
   const [modelMenu, setModelMenu] = useState<'default' | 'vision' | 'reasoning' | null>(null)
   const [availableModels, setAvailableModels] = useState<Record<'default' | 'vision' | 'reasoning', string[]>>({ default: [], vision: [], reasoning: [] })
   const [message, setMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null)
-  const [cacheBytes, setCacheBytes] = useState<number | null>(null)
-  const [clearingCache, setClearingCache] = useState(false)
-
-  const formatBytes = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(0, bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
-
-  useEffect(() => {
-    if (tab !== 'memory' || !window.readingAssistant) return
-    void window.readingAssistant.getCacheStats().then((result) => setCacheBytes(result.bytes)).catch(() => setCacheBytes(null))
-  }, [tab])
 
   const fetchModels = async (mode: 'default' | 'vision' | 'reasoning') => {
     if (modelMenu === mode && availableModels[mode].length) return setModelMenu(null)
@@ -102,29 +93,6 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
     }
   }
 
-  const openUserDataFolder = async () => {
-    setMessage(null)
-    try {
-      if (!window.readingAssistant) throw new Error(pack.code === 'en-US' ? 'This action is only available in the desktop app.' : '此操作仅支持桌面版。')
-      const result = await window.readingAssistant.openUserDataFolder()
-      if (result.error) throw new Error(result.error)
-      setMessage({ type: 'ok', text: pack.code === 'en-US' ? `Data folder opened: ${result.path}` : `已打开数据文件夹：${result.path}` })
-    } catch (reason) {
-      setMessage({ type: 'error', text: reason instanceof Error ? reason.message : (pack.code === 'en-US' ? 'Could not open the data folder.' : '无法打开数据文件夹。') })
-    }
-  }
-
-  const clearCaches = async () => {
-    setClearingCache(true); setMessage(null)
-    try {
-      if (!window.readingAssistant) throw new Error(pack.code === 'en-US' ? 'This action is only available in the desktop app.' : '此操作仅支持桌面版。')
-      const result = await window.readingAssistant.clearCaches()
-      setCacheBytes(result.bytes)
-      setMessage({ type: 'ok', text: pack.code === 'en-US' ? `Cleared ${formatBytes(result.removedBytes)} of temporary cache.` : `已清理 ${formatBytes(result.removedBytes)} 临时缓存。` })
-    } catch (reason) {
-      setMessage({ type: 'error', text: reason instanceof Error ? reason.message : (pack.code === 'en-US' ? 'Could not clear the cache.' : '无法清理缓存。') })
-    } finally { setClearingCache(false) }
-  }
 
   const save = () => {
     if (!draft.apiKey.trim() && !serverConfigured) return setMessage({ type: 'error', text: pack.code === 'en-US' ? 'Enter an API key.' : '请填写 API Key。' })
@@ -174,8 +142,6 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
         </section>}
 
         {tab === 'memory' && <section className="memory-settings">
-          <div className="data-backup-row"><small>{pack.code === 'en-US' ? 'RaidData is stored inside the installation folder. Before updating, reinstalling, or uninstalling, open it, quit Raid, and move the entire folder somewhere safe if you want to keep it.' : 'RaidData 位于安装目录内。更新、重装或卸载前，如需保留资料，请打开目录、退出 Raid，再将整个 RaidData 文件夹移到安全位置。'}</small><button type="button" onClick={() => void openUserDataFolder()}><FolderOpen size={14} />{pack.code === 'en-US' ? 'Open RaidData' : '打开 RaidData'}</button></div>
-          <div className="cache-maintenance-row"><span><strong>{pack.code === 'en-US' ? 'Temporary cache' : '临时缓存'}</strong><small>{cacheBytes === null ? (pack.code === 'en-US' ? 'Calculating…' : '正在计算…') : formatBytes(cacheBytes)} · {pack.code === 'en-US' ? 'Auto-cleared every 7 days or at 256 MB' : '每 7 天或达到 256 MB 自动清理'}</small></span><button type="button" disabled={clearingCache} onClick={() => void clearCaches()}>{clearingCache ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{pack.code === 'en-US' ? 'Clear cache' : '清理缓存'}</button></div>
           <section className="project-memory-list"><div className="memory-section-heading"><span>{pack.code === 'en-US' ? 'Project memory' : '项目记忆'} · {projects.length}</span></div><div className="memory-file-list">{projects.map((project) => <article key={project.id}><Database size={15} /><div><strong>{project.fileName}</strong><small>{project.conversationCount} {t('memoryConversations')} · {new Date(project.updatedAt).toLocaleString()}</small></div><button onClick={() => { if (window.confirm(pack.code === 'en-US' ? 'Deleting this project also permanently deletes all related conversations, notes, note images, highlights, and annotations. Continue?' : '删除项目将同时永久删除全部相关对话、未导出笔记、笔记墨迹图片、高亮与批注。是否继续？')) void onDeleteProject(project.id) }}><Trash2 size={14} /></button></article>)}</div></section>
           <section className="memory-card">
             <label className="vision-toggle"><input type="checkbox" checked={memorySettings.userMemoryEnabled} onChange={(event) => onMemorySettingsChange({ ...memorySettings, userMemoryEnabled: event.target.checked })} /><span className="vision-switch" aria-hidden="true" /><span><strong>{t('userMemory')}</strong><small>{t('userMemoryHelp')}</small></span></label>

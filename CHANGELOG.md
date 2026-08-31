@@ -8,14 +8,15 @@ All notable changes to Raid are documented here.
 
 - Added drag-and-drop project creation from files dropped anywhere on the main window.
 - Added document-to-PDF reading for text, Markdown, source code, CSV/JSON, DOCX, PPTX, XLSX, ODT/ODS/ODP, RTF, and EPUB, with optional LibreOffice fallback for legacy office formats.
-- Added cache size reporting and manual cache cleanup in Memory settings.
+- Added drag-to-reorder navigation tools with a persistent custom order.
+- Added geometry-aware paragraph references for multi-column PDFs, compact numeric AI citations, and click-to-jump source highlighting.
 
 ### Changed
 
-- Moved the complete Electron profile, project database, settings, document assets, crash data, and caches into `RaidData` beside the executable; test builds use an isolated `RaidData-test` folder.
+- Split `RaidData` into a versioned durable project store, runtime profile, and disposable cache; existing IndexedDB projects migrate automatically and test builds remain isolated in `RaidData-test`.
 - Reduced the desktop minimum window size and added narrow-window overlay panels so Windows split-screen layouts remain usable.
-- Conversion scratch files are removed after every conversion and on startup; Chromium caches are cleared every seven days or after reaching 256 MB.
-- Memory settings can open the complete `RaidData` folder for manual backup before an update, reinstall, or uninstall.
+- Conversion scratch files and Chromium caches are cleared on every normal exit and again on startup after an interrupted session.
+- Removed storage and cache controls from Memory settings.
 
 ## [1.0.0] - 2026-08-30
 

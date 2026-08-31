@@ -9,7 +9,7 @@ import rehypeKatex from 'rehype-katex'
 import SelectableCanvas from './SelectableCanvas'
 import AnnotationLayer from './AnnotationLayer'
 import type { AnnotationTool, DocumentAnnotation, DocumentHighlight, SelectionResult, SourceFile, TextAnnotation } from '../types'
-import { loadPdf } from '../lib/pdf'
+import { loadPdf, type DocumentReference } from '../lib/pdf'
 import { useI18n } from '../i18n'
 
 type Props = {
@@ -24,6 +24,7 @@ type Props = {
   onTextTranslate: (text: string, signal: AbortSignal) => Promise<string>
   highlights: DocumentHighlight[]
   onHighlight: (highlight: Omit<DocumentHighlight, 'id'>) => void
+  citationFocus: DocumentReference | null
   annotationMode: boolean
   annotationTool: AnnotationTool
   annotationColor: string
@@ -33,7 +34,7 @@ type Props = {
 
 type AnnotationPageProps = Pick<Props, 'annotationMode' | 'annotationTool' | 'annotationColor' | 'annotations' | 'onAnnotationsChange'>
 
-function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highlights, ...annotationProps }: { pdf: PDFDocumentProxy; pageNumber: number; zoom: number; inverted: boolean; textSelectionEnabled: boolean; highlights: DocumentHighlight[] } & AnnotationPageProps) {
+function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highlights, citationFocus, ...annotationProps }: { pdf: PDFDocumentProxy; pageNumber: number; zoom: number; inverted: boolean; textSelectionEnabled: boolean; highlights: DocumentHighlight[]; citationFocus: DocumentReference | null } & AnnotationPageProps) {
   const textLayerRef = useRef<HTMLDivElement>(null)
   const render = useCallback(async (canvas: HTMLCanvasElement) => {
     const page = await pdf.getPage(pageNumber)
@@ -74,7 +75,8 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
   }, [pdf, pageNumber, textSelectionEnabled, zoom, highlights])
 
   const pageRegions = highlights.flatMap((highlight) => (highlight.regions || []).filter((item) => item.page === pageNumber).map((item) => ({ ...item.region, color: highlight.color })))
-  return <SelectableCanvas pageNumber={pageNumber} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div><div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /></>} />
+  const focusedRegion = citationFocus?.page === pageNumber ? citationFocus.region : null
+  return <SelectableCanvas pageNumber={pageNumber} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /></>} />
 }
 
 function ImagePage({ source, zoom, inverted, ...annotationProps }: { source: SourceFile; zoom: number; inverted: boolean } & AnnotationPageProps) {
@@ -120,7 +122,7 @@ function drawAnnotationsIntoCrop(context: CanvasRenderingContext2D, pageAnnotati
   context.restore()
 }
 
-export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, annotationMode, annotationTool, annotationColor, annotations, onAnnotationsChange }: Props) {
+export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotations, onAnnotationsChange }: Props) {
   const { t, pack } = useI18n()
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [error, setError] = useState('')
@@ -415,7 +417,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
         : pdf && Array.from({ length: pdf.numPages }, (_, index) => {
           const pageNumber = index + 1
           return Math.abs(pageNumber - currentPage) <= renderRadius
-            ? <PdfPage key={pageNumber} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode} highlights={highlights} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
+            ? <PdfPage key={pageNumber} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode} highlights={highlights} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
             : <div key={pageNumber} className="pdf-page-placeholder" data-page-number={pageNumber} style={{ width: 500 * zoom, height: 710 * zoom }}><span>{pageNumber}</span></div>
         })}
       {selectionRect && <div className="document-selection-rect" style={selectionRect} />}

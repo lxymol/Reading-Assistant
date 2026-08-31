@@ -17,7 +17,7 @@ import AiSettingsModal from './components/AiSettingsModal'
 import NoteEditor from './components/NoteEditor'
 import ProjectExplorer from './components/ProjectExplorer'
 import WorkspacePanel from './components/WorkspacePanel'
-import { extractPdfRegionText, extractPdfText } from './lib/pdf'
+import { extractPdfRegionText, extractPdfText, findDocumentReference, type DocumentReference } from './lib/pdf'
 import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, ImportedSkill, MemorySettings, PanelId, PanelLayout, SelectionResult, SourceFile, TextAnnotation, WorkArea } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
@@ -37,8 +37,9 @@ const normalizeAssistantMarkdown = (content: string) => content
   .replace(/```(?:latex|tex)\s*([\s\S]*?)```/gi, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
   .replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
   .replace(/\\\((.*?)\\\)/g, (_match, formula: string) => `$${formula.trim()}$`)
-  .replace(/\[\[SOURCE:(\d+)\|[\s\S]*?\]\]/g, (_match, page: string) => `[第 ${page} 页](page:${page})`)
-  .replace(/\[\[PAGE:(\d+)\]\]/g, (_match, page: string) => `[第 ${page} 页](page:${page})`)
+  .replace(/\[\[SOURCE:(\d+)\|[\s\S]*?\]\]/g, (_match, page: string) => `[${page}](page:${page})`)
+  .replace(/\[\[REF:(\d+)\]\]/g, (_match, reference: string) => `[${reference}](ref:${reference})`)
+  .replace(/\[\[PAGE:(\d+)\]\]/g, (_match, page: string) => `[${page}](page:${page})`)
 
 type HighlightRegion = NonNullable<DocumentHighlight['regions']>[number]
 const highlightRegionOverlap = (a: HighlightRegion, b: HighlightRegion) => {
@@ -95,6 +96,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [note, setNote] = useState('')
   const [noteAssets, setNoteAssets] = useState<Record<string, string>>({})
   const [highlights, setHighlights] = useState<DocumentHighlight[]>([])
+  const [citationFocus, setCitationFocus] = useState<DocumentReference | null>(null)
   const [annotations, setAnnotations] = useState<DocumentAnnotation[]>([])
   const [annotationMode, setAnnotationMode] = useState(false)
   const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('ink')
@@ -295,7 +297,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         scope,
         fileBlob: source.file,
         documentText,
-        documentTextVersion: 2,
+        documentTextVersion: 3,
         note,
         noteAssets,
         highlights,
@@ -327,7 +329,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           scope: area.scope,
           fileBlob: area.source.file,
           documentText: area.documentText,
-          documentTextVersion: 2,
+          documentTextVersion: 3,
           note: area.note,
           noteAssets: area.noteAssets,
           highlights: area.highlights,
@@ -351,7 +353,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         const file = new File([record.fileBlob!], record.fileName, { type: record.fileType, lastModified: record.lastModified })
         const savedConversations = record.conversations || []
         const savedActiveConversationId = savedConversations.some((item) => item.id === record.activeConversationId) ? record.activeConversationId : savedConversations[0]?.id || ''
-        return { id: makeId(), memoryKey: record.id, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(file), file }, pdf: null, documentText: record.documentTextVersion === 2 ? record.documentText || '' : '', selectedText: '', selections: [], conversations: savedConversations, activeConversationId: savedActiveConversationId, customPrompt: '', zoom: record.zoom || 1, currentPage: record.currentPage || 1, areaSelectionEnabled: record.areaSelectionEnabled || false, scope: record.scope || 'selection', note: record.note || '', noteAssets: record.noteAssets || {}, highlights: record.highlights || [], annotations: record.annotations || [] }
+        return { id: makeId(), memoryKey: record.id, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(file), file }, pdf: null, documentText: record.documentTextVersion === 3 ? record.documentText || '' : '', selectedText: '', selections: [], conversations: savedConversations, activeConversationId: savedActiveConversationId, customPrompt: '', zoom: record.zoom || 1, currentPage: record.currentPage || 1, areaSelectionEnabled: record.areaSelectionEnabled || false, scope: record.scope || 'selection', note: record.note || '', noteAssets: record.noteAssets || {}, highlights: record.highlights || [], annotations: record.annotations || [] }
       })
       setWorkAreas(restored)
     }).catch(() => undefined)
@@ -379,7 +381,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setHistory(area.conversations.find((item) => item.id === area.activeConversationId)?.history || [])
     setCustomPrompt(area.customPrompt); setZoom(area.zoom)
     setCurrentPage(area.currentPage); setAreaSelectionEnabled(area.areaSelectionEnabled); setScope(area.scope); setError('')
-    setNote(area.note || ''); setNoteAssets(area.noteAssets || {}); setHighlights(area.highlights || []); setAnnotations(area.annotations || []); setAnnotationMode(false)
+    setNote(area.note || ''); setNoteAssets(area.noteAssets || {}); setHighlights(area.highlights || []); setAnnotations(area.annotations || []); setAnnotationMode(false); setCitationFocus(null)
     activeWorkAreaIdRef.current = area.id
     activeConversationIdRef.current = area.activeConversationId
     pendingPageRestoreRef.current = area.currentPage
@@ -429,7 +431,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       : restoredConversations[0]?.id || ''
     const next: WorkArea = {
       id, memoryKey, source: { name: readableFile.name, kind: readableFile.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(readableFile), file: readableFile },
-      pdf: null, documentText: remembered?.documentTextVersion === 2 ? remembered.documentText || '' : '', selectedText: '', selections: [], conversations: restoredConversations, activeConversationId: restoredActiveConversationId, customPrompt: '', zoom: remembered?.zoom || 1,
+      pdf: null, documentText: remembered?.documentTextVersion === 3 ? remembered.documentText || '' : '', selectedText: '', selections: [], conversations: restoredConversations, activeConversationId: restoredActiveConversationId, customPrompt: '', zoom: remembered?.zoom || 1,
       currentPage: remembered?.currentPage || 1, areaSelectionEnabled: remembered?.areaSelectionEnabled || false, scope: remembered?.scope || 'selection', note: remembered?.note || '', noteAssets: remembered?.noteAssets || {}, highlights: remembered?.highlights || [], annotations: remembered?.annotations || [],
     }
     setWorkAreas((items) => [...items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item), next])
@@ -717,7 +719,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     try {
       let text = ''
       if (source.kind === 'image') {
-        text = await recognize(source.url)
+        const recognized = await recognize(source.url)
+        text = `[第 1 页]\n[[REF:1|PAGE:1|RECT:0.02000,0.02000,0.96000,0.96000]] ${recognized.replace(/\s*\n\s*/g, ' ')}`
       } else if (pdf) {
         text = await extractPdfText(pdf, (done, total) => report(`${t('extracting')} ${done}/${total}`))
         const contentLength = text.replace(/\[第 \d+ 页\]|\s/g, '').length
@@ -735,7 +738,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
             const context = canvas.getContext('2d')
             if (!context) continue
             await page.render({ canvasContext: context, viewport, canvas }).promise
-            ocrPages.push(`[第 ${pageNumber} 页]\n${await recognize(canvas.toDataURL('image/jpeg', 0.9))}`)
+            const recognized = await recognize(canvas.toDataURL('image/jpeg', 0.9))
+            ocrPages.push(`[第 ${pageNumber} 页]\n[[REF:${pageNumber}|PAGE:${pageNumber}|RECT:0.02000,0.02000,0.96000,0.96000]] ${recognized.replace(/\s*\n\s*/g, ' ')}`)
             page.cleanup()
           }
           text = ocrPages.join('\n\n')
@@ -959,6 +963,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setCurrentPage(page)
   }
 
+  const jumpToReference = (id: number) => {
+    const reference = findDocumentReference(documentText, id)
+    if (!reference) return
+    setCitationFocus(reference)
+    jumpToPage(reference.page)
+  }
+
   const addTextToAi = (text: string) => {
     const selectionId = makeId()
     setSelections((items) => { const next = [...items, { id: selectionId, image: '', images: [], page: currentPage, regions: [], text, textParts: [text], loading: false }]; selectionsRef.current = next; return next })
@@ -1070,7 +1081,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button></div>
       <div className="action-grid"><button disabled={!!busy || currentAiBusy} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
     </section>
-    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-heading"><span><Sparkles size={15} /> {message.label || t('aiAnalysis')}</span><div><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={(url) => url.startsWith('page:') ? url : defaultUrlTransform(url)} components={{ a: ({ href, children }) => href?.startsWith('page:') ? <button className="citation-page-link" onClick={() => jumpToPage(Number(href.slice(5)))}>{children}</button> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
+    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-heading"><span><Sparkles size={15} /> {message.label || t('aiAnalysis')}</span><div><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={(url) => url.startsWith('page:') || url.startsWith('ref:') ? url : defaultUrlTransform(url)} components={{ a: ({ href, children }) => href?.startsWith('ref:') ? <button className="citation-page-link" onClick={() => jumpToReference(Number(href.slice(4)))}>{children}</button> : href?.startsWith('page:') ? <button className="citation-page-link" onClick={() => jumpToPage(Number(href.slice(5)))}>{children}</button> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
     <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{!aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'document' || !selectionReady ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
@@ -1125,7 +1136,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
                 <div className="zoom-control"><button onClick={() => setZoom((z) => Math.max(0.25, z - 0.1))}><Minus size={15} /></button><input aria-label="缩放倍率" type="number" min="25" max="500" value={Math.round(zoom * 100)} onChange={(e) => setZoom(Math.max(.25, Math.min(5, Number(e.target.value) / 100)))} /><span>%</span><button onClick={() => setZoom((z) => Math.min(5, z + 0.1))}><Plus size={15} /></button></div>
               </div>
             </div>
-            <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={setAnnotations} /></div>
+            <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={setAnnotations} /></div>
           </>}</section>
         {rightPanelIds.length > 0 && <div className="dock-column dock-column-right"><div className="panel-resizer left" onPointerDown={(event) => startResize('right', rightDockWidth, event)} />{renderDockPanels(rightPanelIds)}</div>}
         {floatingPanelIds.map(renderPanel)}
