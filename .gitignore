@@ -4,6 +4,7 @@ release*/
 RaidData*/
 .cleanup-old-releases.ps1
 .vite/
+.electron-builder-cache/
 *.tsbuildinfo
 .env
 .env.local

@@ -18,10 +18,10 @@ import NoteEditor from './components/NoteEditor'
 import ProjectExplorer from './components/ProjectExplorer'
 import WorkspacePanel from './components/WorkspacePanel'
 import { extractPdfRegionText, extractPdfText, findDocumentReference, type DocumentReference } from './lib/pdf'
-import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, ImportedSkill, MemorySettings, PanelId, PanelLayout, SelectionResult, SourceFile, TextAnnotation, WorkArea } from './types'
+import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, ChatReference, Conversation, DocumentAnnotation, DocumentHighlight, ImportedSkill, MemorySettings, PanelId, PanelLayout, SelectionResult, SourceFile, TextAnnotation, WorkArea } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
-import { deleteFileMemory, getFileMemory, getFileMemoryId, listFileMemories, listFileMemoryRecords, saveFileMemory, type FileMemoryRecord, type FileMemorySummary } from './lib/memory'
+import { deleteFileMemory, getFileMemory, getFileMemoryId, listFileMemories, migrateLegacyFileMemories, saveFileMemory, type FileMemoryRecord, type FileMemorySummary } from './lib/memory'
 import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadSkills, loadUserMemory } from './lib/preferences'
 
 
@@ -33,13 +33,42 @@ const normalizePanelZ = (items: Record<PanelId, PanelLayout>) => Object.fromEntr
     .sort(([, first], [, second]) => first.z - second.z)
     .map(([id, layout], index) => [id, { ...layout, z: 41 + index }]),
 ) as Record<PanelId, PanelLayout>
-const normalizeAssistantMarkdown = (content: string) => content
+const citationTagPattern = /\\?\[\\?\[\s*(?:REF\s*:\s*\d+(?:\s*\|\s*PAGE\s*:\s*\d+)?(?:\s*\|\s*RECT\s*:[^\]\r\n]+)?|PAGE\s*:\s*\d+|SOURCE\s*:\s*\d+\s*\|[^\]\r\n]*)\s*\\?\]\\?\]/gi
+const limitDisplayedCitationTags = (content: string) => {
+  const matches = [...content.matchAll(citationTagPattern)]
+  const plainLength = content.replace(citationTagPattern, '').trim().length
+  const limit = Math.min(50, Math.max(1, Math.ceil(plainLength / 320)))
+  if (matches.length <= limit) return content
+  const kept = new Set(Array.from({ length: limit }, (_, index) => Math.round(index * (matches.length - 1) / Math.max(1, limit - 1))))
+  let matchIndex = 0
+  return content.replace(citationTagPattern, (tag) => kept.has(matchIndex++) ? tag : '')
+}
+const normalizeAssistantMarkdown = (content: string, citationsDisabled = false, references?: ChatReference[], indexedDocument = '') => (citationsDisabled ? content.replace(citationTagPattern, '') : limitDisplayedCitationTags(content))
   .replace(/```(?:latex|tex)\s*([\s\S]*?)```/gi, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
   .replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
   .replace(/\\\((.*?)\\\)/g, (_match, formula: string) => `$${formula.trim()}$`)
-  .replace(/\[\[SOURCE:(\d+)\|[\s\S]*?\]\]/g, (_match, page: string) => `[${page}](page:${page})`)
-  .replace(/\[\[REF:(\d+)\]\]/g, (_match, reference: string) => `[${reference}](ref:${reference})`)
-  .replace(/\[\[PAGE:(\d+)\]\]/g, (_match, page: string) => `[${page}](page:${page})`)
+  .replace(/\\?\[\\?\[\s*SOURCE\s*:\s*(\d+)\s*\|[^\]\r\n]*\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
+  .replace(/\\?\[\\?\[\s*REF\s*:\s*\d+\s*\|\s*PAGE\s*:\s*(\d+)(?:\s*\|\s*RECT\s*:[^\]\r\n]+)?\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
+  .replace(/\\?\[\\?\[\s*REF\s*:\s*(\d+)\s*\\?\]\\?\]/gi, (_match, reference: string) => {
+    const id = Number(reference)
+    const page = references?.find((item) => item.id === id)?.page || findDocumentReference(indexedDocument, id)?.page
+    return page ? `[${page}](#raid-citation-page-${page})` : ''
+  })
+  .replace(/\\?\[\\?\[\s*PAGE\s*:\s*(\d+)\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
+
+const recentSelectionHistory = (messages: ChatMessage[]) => {
+  let inferredMode: ChatMessage['contextMode']
+  return messages.map((message) => {
+    if (message.role === 'user') {
+      inferredMode = message.contextMode
+        || (/选区|selected/i.test(message.label || '') ? 'selection' : /全文|document/i.test(message.label || '') ? 'document' : undefined)
+    }
+    const contextMode = message.contextMode || (message.citationsDisabled ? 'selection' : inferredMode)
+    return { message, contextMode }
+  }).filter(({ message, contextMode }) => contextMode === 'selection' && message.content.length <= 12000)
+    .slice(-4)
+    .map(({ message }) => ({ role: message.role, content: message.content.slice(0, 4000) }))
+}
 
 type HighlightRegion = NonNullable<DocumentHighlight['regions']>[number]
 const highlightRegionOverlap = (a: HighlightRegion, b: HighlightRegion) => {
@@ -103,6 +132,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [annotationColor, setAnnotationColor] = useState('#2f6fed')
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set())
   const [panelLayouts, setPanelLayouts] = useState(() => normalizePanelZ(loadPanelLayouts()))
+  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'selection', 'notes', 'chat'])
   const abortControllersRef = useRef(new Map<string, AbortController>())
   const hasVisualSelection = aiConfig.visionEnabled && selections.some((item) => item.images.length > 0)
   const selectionReady = Boolean(selectedText || hasVisualSelection)
@@ -114,6 +144,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const panelScrollRef = useRef<HTMLDivElement>(null)
   const readerScrollRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
+  const citationNavigationRef = useRef<{ page: number; until: number } | null>(null)
   const resizeRef = useRef<
     | { kind: 'panel'; panel: 'left' | 'right'; startX: number; startWidth: number }
     | { kind: 'dock-split'; first: PanelId; second: PanelId; startY: number; firstSize: number; secondSize: number; containerHeight: number; bottomLocks: HTMLElement[] }
@@ -297,7 +328,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         scope,
         fileBlob: source.file,
         documentText,
-        documentTextVersion: 3,
+        documentTextVersion: 7,
         note,
         noteAssets,
         highlights,
@@ -309,7 +340,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }, [source, conversations, activeConversationId, history, currentPage, zoom, areaSelectionEnabled, scope, documentText, note, noteAssets, highlights, annotations])
 
   useEffect(() => {
-    const inactiveAreas = workAreas.filter((area) => area.id !== activeWorkAreaId && !forgottenFileKeysRef.current.has(area.memoryKey))
+    const inactiveAreas = workAreas.filter((area) => area.id !== activeWorkAreaId && area.sourceLoaded !== false && !forgottenFileKeysRef.current.has(area.memoryKey))
     if (!inactiveAreas.length) return
     const timer = window.setTimeout(() => {
       inactiveAreas.forEach((area) => {
@@ -329,7 +360,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           scope: area.scope,
           fileBlob: area.source.file,
           documentText: area.documentText,
-          documentTextVersion: 3,
+          documentTextVersion: 7,
           note: area.note,
           noteAssets: area.noteAssets,
           highlights: area.highlights,
@@ -347,16 +378,22 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     let active = true
-    void listFileMemoryRecords().then((records) => {
+    const applyRecords = (records: FileMemorySummary[]) => {
       if (!active) return
-      const restored = records.filter((record) => record.fileBlob).map((record): WorkArea => {
-        const file = new File([record.fileBlob!], record.fileName, { type: record.fileType, lastModified: record.lastModified })
-        const savedConversations = record.conversations || []
-        const savedActiveConversationId = savedConversations.some((item) => item.id === record.activeConversationId) ? record.activeConversationId : savedConversations[0]?.id || ''
-        return { id: makeId(), memoryKey: record.id, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(file), file }, pdf: null, documentText: record.documentTextVersion === 3 ? record.documentText || '' : '', selectedText: '', selections: [], conversations: savedConversations, activeConversationId: savedActiveConversationId, customPrompt: '', zoom: record.zoom || 1, currentPage: record.currentPage || 1, areaSelectionEnabled: record.areaSelectionEnabled || false, scope: record.scope || 'selection', note: record.note || '', noteAssets: record.noteAssets || {}, highlights: record.highlights || [], annotations: record.annotations || [] }
+      setProjectMemories(records)
+      setWorkAreas((existing) => {
+        const restored = records.map((record): WorkArea => {
+        const loaded = existing.find((area) => area.memoryKey === record.id)
+        if (loaded) return loaded
+        const file = new File([], record.fileName, { type: record.fileType, lastModified: record.lastModified })
+        return { id: makeId(), memoryKey: record.id, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: '', file }, pdf: null, documentText: '', selectedText: '', selections: [], conversations: [], activeConversationId: '', customPrompt: '', zoom: 1, currentPage: 1, areaSelectionEnabled: false, scope: 'selection', note: '', noteAssets: {}, highlights: [], annotations: [], sourceLoaded: false }
+        })
+        const recordIds = new Set(records.map((record) => record.id))
+        return [...restored, ...existing.filter((area) => !recordIds.has(area.memoryKey))]
       })
-      setWorkAreas(restored)
-    }).catch(() => undefined)
+    }
+    void listFileMemories().then(applyRecords).catch(() => undefined)
+    void migrateLegacyFileMemories().then(() => listFileMemories()).then(applyRecords).catch(() => undefined)
     return () => { active = false }
   }, [])
 
@@ -371,7 +408,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     id: activeWorkAreaId, memoryKey: getFileMemoryId(source.file), source, pdf, documentText, selectedText, selections,
     conversations: conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item),
     activeConversationId, customPrompt,
-    zoom, currentPage, areaSelectionEnabled, scope, note, noteAssets, highlights, annotations,
+    zoom, currentPage, areaSelectionEnabled, scope, note, noteAssets, highlights, annotations, sourceLoaded: true,
   } : null
 
   const loadWorkArea = (area: WorkArea) => {
@@ -431,8 +468,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       : restoredConversations[0]?.id || ''
     const next: WorkArea = {
       id, memoryKey, source: { name: readableFile.name, kind: readableFile.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(readableFile), file: readableFile },
-      pdf: null, documentText: remembered?.documentTextVersion === 3 ? remembered.documentText || '' : '', selectedText: '', selections: [], conversations: restoredConversations, activeConversationId: restoredActiveConversationId, customPrompt: '', zoom: remembered?.zoom || 1,
-      currentPage: remembered?.currentPage || 1, areaSelectionEnabled: remembered?.areaSelectionEnabled || false, scope: remembered?.scope || 'selection', note: remembered?.note || '', noteAssets: remembered?.noteAssets || {}, highlights: remembered?.highlights || [], annotations: remembered?.annotations || [],
+      pdf: null, documentText: remembered?.documentTextVersion === 7 ? remembered.documentText || '' : '', selectedText: '', selections: [], conversations: restoredConversations, activeConversationId: restoredActiveConversationId, customPrompt: '', zoom: remembered?.zoom || 1,
+      currentPage: remembered?.currentPage || 1, areaSelectionEnabled: remembered?.areaSelectionEnabled || false, scope: remembered?.scope || 'selection', note: remembered?.note || '', noteAssets: remembered?.noteAssets || {}, highlights: remembered?.highlights || [], annotations: remembered?.annotations || [], sourceLoaded: true,
     }
     setWorkAreas((items) => [...items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item), next])
     setActiveWorkAreaId(id)
@@ -440,12 +477,25 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     loadWorkArea(next)
   }
 
-  const openWorkArea = (id: string) => {
+  const hydrateWorkArea = async (area: WorkArea): Promise<WorkArea> => {
+    if (area.sourceLoaded !== false) return area
+    const record = await getFileMemory(area.memoryKey)
+    if (!record?.fileBlob) throw new Error(pack.code === 'en-US' ? 'The project source file is missing.' : '项目源文件缺失。')
+    const file = new File([record.fileBlob], record.fileName, { type: record.fileType, lastModified: record.lastModified })
+    const conversations = record.conversations || []
+    const activeConversationId = conversations.some((item) => item.id === record.activeConversationId) ? record.activeConversationId : conversations[0]?.id || ''
+    return { ...area, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(file), file }, documentText: record.documentTextVersion === 7 ? record.documentText || '' : '', conversations, activeConversationId, zoom: record.zoom || 1, currentPage: record.currentPage || 1, areaSelectionEnabled: record.areaSelectionEnabled || false, scope: record.scope || 'selection', note: record.note || '', noteAssets: record.noteAssets || {}, highlights: record.highlights || [], annotations: record.annotations || [], sourceLoaded: true }
+  }
+
+  const openWorkArea = async (id: string) => {
     if (id === activeWorkAreaId) { pendingPageRestoreRef.current = currentPage; return }
     const snapshot = snapshotCurrent()
-    const target = workAreas.find((item) => item.id === id)
-    if (!target) return
-    setWorkAreas((items) => items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item))
+    const storedTarget = workAreas.find((item) => item.id === id)
+    if (!storedTarget) return
+    let target: WorkArea
+    try { target = await hydrateWorkArea(storedTarget) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')); return }
+    setWorkAreas((items) => items.map((item) => item.id === target.id ? target : snapshot && item.id === snapshot.id ? snapshot : item))
     setActiveWorkAreaId(id)
     activeWorkAreaIdRef.current = id
     loadWorkArea(target)
@@ -475,12 +525,15 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setError('')
   }
 
-  const createConversationForArea = (areaId: string) => {
+  const createConversationForArea = async (areaId: string) => {
     setCollapsedProjectIds((items) => { const next = new Set(items); next.delete(areaId); return next })
     if (areaId === activeWorkAreaId) createConversation()
     else {
-      const target = workAreas.find((item) => item.id === areaId)
-      if (!target) return
+      const storedTarget = workAreas.find((item) => item.id === areaId)
+      if (!storedTarget) return
+      let target: WorkArea
+      try { target = await hydrateWorkArea(storedTarget) }
+      catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')); return }
       const snapshot = snapshotCurrent()
       const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
       const next = { ...target, conversations: [...target.conversations, conversation], activeConversationId: conversation.id }
@@ -586,6 +639,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       scrollFrameRef.current = null
       const container = readerScrollRef.current
       if (!container) return
+      const navigation = citationNavigationRef.current
+      if (navigation && Date.now() < navigation.until) {
+        setCurrentPage(navigation.page)
+        return
+      }
+      citationNavigationRef.current = null
       const targetY = container.getBoundingClientRect().top + container.clientHeight * 0.38
       let closestPage = currentPage
       let closestDistance = Number.POSITIVE_INFINITY
@@ -828,7 +887,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setWorkAreas(remaining)
     if (target?.id === activeWorkAreaId) {
       const next = remaining.at(-1)
-      if (next) { setActiveWorkAreaId(next.id); loadWorkArea(next) }
+      if (next) {
+        try {
+          const hydrated = await hydrateWorkArea(next)
+          setWorkAreas((items) => items.map((item) => item.id === hydrated.id ? hydrated : item))
+          setActiveWorkAreaId(hydrated.id); loadWorkArea(hydrated)
+        } catch { setActiveWorkAreaId(null); activeWorkAreaIdRef.current = null; setSource(null) }
+      }
       else { setActiveWorkAreaId(null); activeWorkAreaIdRef.current = null; setSource(null); setAnnotations([]); setAnnotationMode(false) }
     }
     setProjectMemories(await listFileMemories())
@@ -888,11 +953,15 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     if (aiTasks.has(taskKey)) return
     const targetIsDocument = scope === 'document' || !selectionReady
     const selectionImages = targetIsDocument ? [] : selections.flatMap((item) => item.images).slice(0, 4)
+    const selectionUsesText = !targetIsDocument && Boolean(selectedText.trim())
+    const fastSelectionTranslation = selectionUsesText && action === 'translate'
+    const requestImages = selectionUsesText ? [] : selectionImages
     const reasoningActive = deepThinking && aiConfig.reasoningEnabled
     const actionLabel = (requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId)?.name : effectiveInstruction) || ({ translate: t('translate'), explain: t('explain'), insight: t('insight'), summarize: t('summarize'), custom: 'AI' }[action])
     const userLabel = `${targetIsDocument ? t('documentScope') : t('selectedScope')} · ${actionLabel}`
     const targetText = targetIsDocument ? (documentText || source.name) : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
-    const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, label: userLabel, sourcePage: currentPage }
+    const contextMode: ChatMessage['contextMode'] = targetIsDocument ? 'document' : 'selection'
+    const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, contextMode, label: userLabel, sourcePage: currentPage }
     const requestHistory = [...previousHistory, userMessage]
     setHistory(requestHistory)
     setConversations((items) => items.map((item) => item.id === conversationId ? {
@@ -905,8 +974,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     abortControllersRef.current.set(taskKey, requestController)
     setCustomPrompt('')
     try {
-      const context = await buildDocumentContext(workspaceId)
-      const annotationContext = annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[第 ${annotation.page} 页批注]\n${annotation.text.trim()}`).join('\n\n')
+      const context = targetIsDocument ? await buildDocumentContext(workspaceId) : ''
+      const annotationContext = targetIsDocument ? annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[第 ${annotation.page} 页批注]\n${annotation.text.trim()}`).join('\n\n') : ''
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -916,28 +985,28 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           selectedText: targetIsDocument ? '' : selectedText,
           documentText: [context, annotationContext].filter(Boolean).join('\n\n'),
           instruction: effectiveInstruction,
-          includeContext: true,
-          contextMode: targetIsDocument ? 'document' : 'selection',
+          includeContext: targetIsDocument && Boolean(context),
+          contextMode,
           anchorPages: targetIsDocument ? [] : Array.from(new Set(selections.flatMap((item) => item.regions.map((region) => region.page)).concat(currentPage))),
-          history: previousHistory.map(({ role, content }) => ({ role, content })),
+          history: targetIsDocument ? previousHistory.map(({ role, content }) => ({ role, content })) : recentSelectionHistory(previousHistory),
           aiConfig,
-          deepThinking: reasoningActive,
+          deepThinking: fastSelectionTranslation ? false : reasoningActive,
           responseLanguage: pack.aiLanguage,
-          userMemory: memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
-          selectionHasImages: selectionImages.length > 0,
-          selectionImages: aiConfig.visionEnabled ? selectionImages : [],
-          skills: skills.map(({ id, name, command, description, instructions }) => ({ id, name, command, description, instructions })),
+          userMemory: targetIsDocument && memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
+          selectionHasImages: requestImages.length > 0,
+          selectionImages: aiConfig.visionEnabled ? requestImages : [],
+          skills: targetIsDocument || requestedSkillId ? skills.map(({ id, name, command, description, instructions }) => ({ id, name, command, description, instructions })) : [],
           requestedSkillId,
         }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || t('requestFailed'))
-      const assistantMessage: ChatMessage = { id: makeId(), role: 'assistant', content: data.content, label: data.skillName ? `${t('skillUsed')} · ${data.skillName}` : undefined }
+      const assistantMessage: ChatMessage = { id: makeId(), role: 'assistant', content: data.content, contextMode, label: data.skillName ? `${t('skillUsed')} · ${data.skillName}` : undefined, references: targetIsDocument && Array.isArray(data.references) ? data.references : undefined, citationsDisabled: !targetIsDocument }
       updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: [...conversation.history, assistantMessage] }))
       learnUserMemory(effectiveInstruction || actionLabel, data.content)
     } catch (reason) {
       const message = requestController.signal.aborted ? (pack.code === 'en-US' ? 'Generation stopped.' : '已停止生成。') : reason instanceof Error ? reason.message : t('processFailed')
-      const errorMessage: ChatMessage = { id: makeId(), role: 'assistant', content: `⚠️ ${message}` }
+      const errorMessage: ChatMessage = { id: makeId(), role: 'assistant', content: `⚠️ ${message}`, contextMode, citationsDisabled: !targetIsDocument }
       updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: [...conversation.history, errorMessage] }))
     } finally {
       abortControllersRef.current.delete(taskKey)
@@ -956,18 +1025,23 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setConversations((items) => items.map((item) => item.id === activeConversationId ? { ...item, history: next } : item))
   }
 
-  const jumpToPage = (page: number) => {
-    const container = readerScrollRef.current
-    const target = container?.querySelector<HTMLElement>(`[data-page-number="${page}"]`)
-    if (container && target) container.scrollTo({ top: target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 20, behavior: 'smooth' })
-    setCurrentPage(page)
-  }
-
-  const jumpToReference = (id: number) => {
-    const reference = findDocumentReference(documentText, id)
-    if (!reference) return
-    setCitationFocus(reference)
-    jumpToPage(reference.page)
+  const jumpToPage = (page: number, regionTop?: number) => {
+    const safePage = Math.max(1, Math.min(pdf?.numPages || 1, page))
+    setCurrentPage(safePage)
+    const scrollWhenRendered = (attempt = 0) => requestAnimationFrame(() => {
+      const container = readerScrollRef.current
+      const target = container?.querySelector<HTMLElement>(`[data-page-number="${safePage}"]`)
+      if (!container || !target) return
+      const nearbyPagesReady = Array.from(container.querySelectorAll<HTMLElement>('.selectable-page')).every((page) => {
+        const canvas = page.querySelector('canvas')
+        return Boolean(canvas && canvas.width > 0 && canvas.height > 0)
+      })
+      if ((target.classList.contains('pdf-page-placeholder') || !nearbyPagesReady) && attempt < 180) return scrollWhenRendered(attempt + 1)
+      const regionOffset = typeof regionTop === 'number' ? target.getBoundingClientRect().height * regionTop - container.clientHeight * .22 : -20
+      container.scrollTo({ top: target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop + regionOffset, behavior: 'auto' })
+      setCurrentPage(safePage)
+    })
+    scrollWhenRendered()
   }
 
   const addTextToAi = (text: string) => {
@@ -1009,6 +1083,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const updatePanel = (id: PanelId, layout: PanelLayout) => setPanelLayouts((items) => ({ ...items, [id]: layout }))
   const raisePanel = (id: PanelId) => setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], z: nextPanelZ(items) } }))
   const togglePanel = (id: PanelId) => setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], open: !items[id].open, z: nextPanelZ(items) } }))
+  const updatePanelOrder = useCallback((next: PanelId[]) => setPanelOrder((current) => current.length === next.length && current.every((id, index) => id === next[index]) ? current : next), [])
   const toggleAnnotationMode = () => {
     setAnnotationMode((active) => {
       if (!active) {
@@ -1018,7 +1093,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       return !active
     })
   }
-  const visiblePanelIds = (Object.keys(panelLayouts) as PanelId[]).filter((id) => panelLayouts[id].open && (id === 'projects' || Boolean(source)))
+  const panelPosition = (id: PanelId) => {
+    const index = panelOrder.indexOf(id)
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index
+  }
+  const visiblePanelIds = (Object.keys(panelLayouts) as PanelId[])
+    .filter((id) => panelLayouts[id].open && (id === 'projects' || Boolean(source)))
+    .sort((first, second) => panelPosition(first) - panelPosition(second))
   const leftPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'left')
   const rightPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'right')
   const floatingPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'float')
@@ -1081,7 +1162,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button></div>
       <div className="action-grid"><button disabled={!!busy || currentAiBusy} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
     </section>
-    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-heading"><span><Sparkles size={15} /> {message.label || t('aiAnalysis')}</span><div><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={(url) => url.startsWith('page:') || url.startsWith('ref:') ? url : defaultUrlTransform(url)} components={{ a: ({ href, children }) => href?.startsWith('ref:') ? <button className="citation-page-link" onClick={() => jumpToReference(Number(href.slice(4)))}>{children}</button> : href?.startsWith('page:') ? <button className="citation-page-link" onClick={() => jumpToPage(Number(href.slice(5)))}>{children}</button> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
+    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-heading"><span><Sparkles size={15} /> {message.label || t('aiAnalysis')}</span><div><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform} components={{ a: ({ href, children }) => href?.startsWith('#raid-citation-page-') ? <span className="citation-page-label">{children}</span> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content, message.citationsDisabled, message.references, documentText)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
     <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{!aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'document' || !selectionReady ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
@@ -1108,6 +1189,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         onToggleAnnotation={toggleAnnotationMode}
         onToggleTheme={() => setDark((value) => !value)}
         onOpenSettings={openSettings}
+        onPanelOrderChange={updatePanelOrder}
       />
       <main className="workspace" style={{ '--selection-width': `${leftPanelIds.length ? leftDockWidth : 0}px`, '--ai-width': `${rightPanelIds.length ? rightDockWidth : 0}px` } as CSSProperties}>
         {leftPanelIds.length > 0 && <div className="dock-column dock-column-left">{renderDockPanels(leftPanelIds)}<div className="panel-resizer right" onPointerDown={(event) => startResize('left', leftDockWidth, event)} /></div>}

@@ -4,12 +4,14 @@ All notable changes to Raid are documented here.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-01
+
 ### Added
 
 - Added drag-and-drop project creation from files dropped anywhere on the main window.
 - Added document-to-PDF reading for text, Markdown, source code, CSV/JSON, DOCX, PPTX, XLSX, ODT/ODS/ODP, RTF, and EPUB, with optional LibreOffice fallback for legacy office formats.
 - Added drag-to-reorder navigation tools with a persistent custom order.
-- Added geometry-aware paragraph references for multi-column PDFs, compact numeric AI citations, and click-to-jump source highlighting.
+- Added geometry-aware paragraph indexing for multi-column PDFs and compact page-number labels in whole-document AI answers.
 
 ### Changed
 
@@ -17,6 +19,15 @@ All notable changes to Raid are documented here.
 - Reduced the desktop minimum window size and added narrow-window overlay panels so Windows split-screen layouts remain usable.
 - Conversion scratch files and Chromium caches are cleared on every normal exit and again on startup after an interrupted session.
 - Removed storage and cache controls from Memory settings.
+- Removed cleanup and legacy migration waits from the startup path; project migration continues in the background, saved source files load only when opened, conversion scratch data is deleted on exit, and startup caches are retained under a 128 MB cap.
+- Restored Electron's small runtime profile to the Windows default high-performance location while keeping all durable project files in `RaidData`; runtime caches and the migrated legacy IndexedDB are removed when Raid closes.
+- Selection AI requests now send only the selected text or image plus the two most recent selection-chat turns; document context, document summaries, automatic Skill routing, and user memory are excluded.
+
+### Fixed
+
+- Fixed selection requests that could stall while unnecessary document context was prepared or sent.
+- Fixed raw `REF`, `PAGE`, and `SOURCE` syntax appearing in AI answers; selection answers remove source tags and whole-document answers show non-interactive page numbers.
+- Fixed navigation reordering animation, sidebar panel ordering, selection-panel availability, and several citation parsing edge cases.
 
 ## [1.0.0] - 2026-08-30
 

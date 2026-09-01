@@ -22,8 +22,18 @@ export type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  contextMode?: 'selection' | 'document'
   label?: string
   sourcePage?: number
+  references?: ChatReference[]
+  citationsDisabled?: boolean
+}
+
+export type ChatReference = {
+  id: number
+  page: number
+  region: { left: number; top: number; width: number; height: number }
+  text: string
 }
 
 export type AiConfig = {
@@ -136,6 +146,7 @@ export type WorkArea = {
   noteAssets: Record<string, string>
   highlights: DocumentHighlight[]
   annotations: DocumentAnnotation[]
+  sourceLoaded?: boolean
 }
 
 export type PanelId = 'projects' | 'selection' | 'chat' | 'notes'

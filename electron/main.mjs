@@ -32,6 +32,8 @@ const crashDataPath = path.join(cacheDataPath, 'Crashpad')
 const conversionCachePath = path.join(cacheDataPath, 'Conversion')
 const dataManifestPath = path.join(raidDataPath, 'manifest.json')
 const storageSchemaVersion = 1
+const defaultUserDataPath = app.getPath('userData')
+const defaultSessionDataPath = app.getPath('sessionData')
 
 function moveLegacyRuntimeEntry(name, destination = path.join(runtimeDataPath, name)) {
   const source = path.join(raidDataPath, name)
@@ -44,8 +46,10 @@ fs.mkdirSync(runtimeDataPath, { recursive: true })
 moveLegacyRuntimeEntry('Chromium', sessionDataPath)
 moveLegacyRuntimeEntry('Code Cache')
 for (const directory of [raidDataPath, runtimeDataPath, durableDataPath, projectsDataPath, cacheDataPath, sessionDataPath, crashDataPath, conversionCachePath]) fs.mkdirSync(directory, { recursive: true })
-app.setPath('userData', runtimeDataPath)
-app.setPath('sessionData', sessionDataPath)
+if (isDevelopmentInstance) {
+  app.setPath('userData', `${defaultUserDataPath}-test`)
+  app.setPath('sessionData', `${defaultSessionDataPath}-test`)
+}
 app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
 const internalPort = isDevelopmentInstance ? 18788 : 18787
@@ -258,6 +262,27 @@ function listProjectRecords(includeSource = true) {
   return records.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
 }
 
+function projectSummary(record) {
+  return { id: record.id, fileName: record.fileName, fileSize: record.fileSize, fileType: record.fileType, lastModified: record.lastModified, updatedAt: record.updatedAt, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : Number(record.conversationCount || 0) }
+}
+
+function listProjectSummaries() {
+  const summaries = []
+  for (const entry of fs.readdirSync(projectsDataPath, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const directory = path.join(projectsDataPath, entry.name)
+    try {
+      const summaryPath = path.join(directory, 'summary.json')
+      const summary = fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf8')) : projectSummary(readProjectRecord(directory, false) || {})
+      if (!fs.existsSync(summaryPath) && summary.id) writeJsonAtomically(summaryPath, summary)
+      if (summary.id) summaries.push(summary)
+    } catch (error) {
+      logStartup(`Skipped unreadable project summary ${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return summaries.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+}
+
 function saveProjectRecord(payload) {
   if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string') throw new Error('INVALID_PROJECT_RECORD')
   const directory = projectDataDirectory(payload.id)
@@ -270,6 +295,7 @@ function saveProjectRecord(payload) {
     fs.renameSync(temporarySource, sourcePath)
   }
   writeJsonAtomically(path.join(directory, 'project.json'), { schemaVersion: storageSchemaVersion, hasSource: fs.existsSync(sourcePath), ...record })
+  writeJsonAtomically(path.join(directory, 'summary.json'), projectSummary(record))
   writeDataManifest()
   return true
 }
@@ -281,47 +307,41 @@ function deleteProjectRecord(id) {
 
 writeDataManifest()
 
-async function getCacheStats() {
-  const chromiumBytes = await session.defaultSession.getCacheSize().catch(() => 0)
-  let supplementalBytes = 0
-  const visit = (directory) => {
-    if (!fs.existsSync(directory)) return
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const absolutePath = path.join(directory, entry.name)
-      if (entry.isDirectory()) visit(absolutePath)
-      else if (entry.isFile()) supplementalBytes += fs.statSync(absolutePath).size
-    }
+function directorySize(directory) {
+  if (!fs.existsSync(directory)) return 0
+  let bytes = 0
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const absolutePath = path.join(directory, entry.name)
+    if (entry.isDirectory()) bytes += directorySize(absolutePath)
+    else if (entry.isFile()) bytes += fs.statSync(absolutePath).size
   }
-  visit(conversionCachePath)
-  visit(path.join(runtimeDataPath, 'Code Cache'))
-  return { bytes: chromiumBytes + supplementalBytes, path: raidDataPath }
+  return bytes
 }
 
-async function clearAppCaches() {
-  const before = await getCacheStats()
-  await session.defaultSession.clearCache()
-  await session.defaultSession.clearCodeCaches({})
+async function maintainCachesOnExit() {
+  if (readDataManifest().systemProfileProjectMigrationComplete) await session.defaultSession.clearData({ dataTypes: ['indexedDB'] }).catch(() => undefined)
+  const runtimeRoots = new Set([app.getPath('userData'), app.getPath('sessionData')])
+  const performanceCacheNames = ['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache']
+  const performanceCacheBytes = [...runtimeRoots].reduce((total, root) => total + performanceCacheNames.reduce((sum, name) => sum + directorySize(path.join(root, name)), 0), 0)
+  if (performanceCacheBytes > 128 * 1024 * 1024) {
+    await session.defaultSession.clearCache()
+    await session.defaultSession.clearCodeCaches({})
+    for (const root of runtimeRoots) for (const name of performanceCacheNames) fs.rmSync(path.join(root, name), { recursive: true, force: true })
+  }
   fs.rmSync(conversionCachePath, { recursive: true, force: true })
   fs.mkdirSync(conversionCachePath, { recursive: true })
-  return { removedBytes: before.bytes, ...(await getCacheStats()) }
-}
-
-async function maintainCaches() {
-  fs.rmSync(conversionCachePath, { recursive: true, force: true })
-  fs.mkdirSync(conversionCachePath, { recursive: true })
-  await clearAppCaches()
 }
 
 ipcMain.handle('reading-assistant:select-skill-folder', () => selectImportFolder('skill'))
 ipcMain.handle('reading-assistant:select-language-folder', () => selectImportFolder('language'))
 ipcMain.handle('reading-assistant:convert-document', (_event, payload) => convertDocument(payload))
-ipcMain.handle('reading-assistant:list-project-memories', () => listProjectRecords(true))
+ipcMain.handle('reading-assistant:list-project-memories', () => listProjectRecords(false))
 ipcMain.handle('reading-assistant:get-project-memory', (_event, id) => readProjectRecord(projectDataDirectory(id), true))
 ipcMain.handle('reading-assistant:save-project-memory', (_event, payload) => saveProjectRecord(payload))
 ipcMain.handle('reading-assistant:delete-project-memory', (_event, id) => deleteProjectRecord(id))
-ipcMain.handle('reading-assistant:list-project-memory-summaries', () => listProjectRecords(false).map((record) => ({ id: record.id, fileName: record.fileName, fileSize: record.fileSize, fileType: record.fileType, lastModified: record.lastModified, updatedAt: record.updatedAt, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : 0 })))
-ipcMain.handle('reading-assistant:get-project-migration-status', () => Boolean(readDataManifest().legacyProjectMigrationComplete))
-ipcMain.handle('reading-assistant:complete-project-migration', () => { writeDataManifest({ legacyProjectMigrationComplete: true }); return true })
+ipcMain.handle('reading-assistant:list-project-memory-summaries', () => listProjectSummaries())
+ipcMain.handle('reading-assistant:get-project-migration-status', () => Boolean(readDataManifest().systemProfileProjectMigrationComplete))
+ipcMain.handle('reading-assistant:complete-project-migration', () => { writeDataManifest({ legacyProjectMigrationComplete: true, systemProfileProjectMigrationComplete: true }); return true })
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)
   return mainWindow && panelWindow && !panelWindow.isDestroyed() && panelWindow.getParentWindow() === mainWindow ? panelWindow : null
@@ -506,9 +526,7 @@ if (!hasSingleInstanceLock) {
   })
   app.whenReady().then(() => {
     logStartup('Electron ready')
-    return maintainCaches()
-      .catch((error) => logStartup(`Cache maintenance failed: ${error instanceof Error ? error.message : String(error)}`))
-      .then(() => createWindow())
+    return createWindow()
   }).catch((error) => {
     logStartup(`Startup failed: ${error instanceof Error ? error.stack || error.message : String(error)}`)
     console.error(error)
@@ -531,7 +549,7 @@ app.on('before-quit', (event) => {
   if (exitCacheCleanupComplete || exitCacheCleanupStarted) return
   event.preventDefault()
   exitCacheCleanupStarted = true
-  void clearAppCaches().catch((error) => logStartup(`Exit cache cleanup failed: ${error instanceof Error ? error.message : String(error)}`)).finally(() => {
+  void maintainCachesOnExit().catch((error) => logStartup(`Exit cache cleanup failed: ${error instanceof Error ? error.message : String(error)}`)).finally(() => {
     exitCacheCleanupComplete = true
     app.quit()
   })

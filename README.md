@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.0.0-3794ff)
+![Version](https://img.shields.io/badge/version-1.1.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid is a lightweight, project-oriented AI reader for papers, textbooks, and technical documents. It combines continuous PDF/image reading, text and cross-page area selection, OCR, Markdown notes, persistent annotations, and user-configured models.
@@ -18,7 +18,7 @@ Raid is a lightweight, project-oriented AI reader for papers, textbooks, and tec
 - Colored text and ink annotations
 - Live Markdown notes with pasted images, smart-cropped ink, and Markdown export
 - Dockable component sidebars and detachable floating windows
-- AI Q&A for selections or complete documents, with navigable references in responses and support for multiple user-configured models
+- AI Q&A for selections or complete documents, with compact page labels in document answers and support for multiple user-configured models
 - Importable Skills and language packs, automatic Skill routing, and explicit `/skill-command` selection
 - Multi-project history memory and user-profile management
 - Split-screen-friendly narrow layout and drag-to-reorder navigation tools
@@ -35,12 +35,12 @@ Raid is a lightweight, project-oriented AI reader for papers, textbooks, and tec
 
 Raid uses retrieval-augmented context, but it does not require a vector database:
 
-- **Selection mode:** sends a compact page-by-page overview of the complete document, exact content from the selected and neighboring pages, and lexically ranked related chunks from elsewhere in the document. Up to four selected images may be sent when vision is enabled.
+- **Selection mode:** sends only the current selection and the two most recent selection-chat turns—never the complete document, a document summary, or long-term user memory. Recognized text is sent without images; up to four selected images may be sent when visual understanding is required.
 - **Document mode:** sends the page overview plus exact full text for documents within the context limit. Very large documents use query-ranked chunks together with passages distributed across the full document.
-- **Grounding:** PDF text is reconstructed into lines, columns, and paragraphs from layout coordinates. Answers show numeric-only references that jump to and highlight the source paragraph.
+- **Source labels:** PDF text is reconstructed into lines, columns, and paragraphs from layout coordinates for common multi-column layouts. Whole-document answers show underlined page numbers; click-to-jump is not enabled in this release.
 - **Annotations:** visible ink is drawn into selection images; overlapping text annotations are appended to extracted text, and all text annotations can participate in document questions.
 
-This strategy preserves local detail for selections, broad coverage for whole-document questions, and predictable behavior on large files.
+This strategy keeps selection operations lightweight while preserving broad coverage for whole-document questions and predictable behavior on large files.
 
 ## Memory model
 
@@ -55,9 +55,9 @@ Project memory is document state persistence rather than semantic RAG memory. Th
 
 Download the Windows installer from [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases). Raid does not modify system environment variables and does not require a separate Node.js installation.
 
-Raid keeps its data in the `RaidData` folder beside the executable instead of accumulating project files in the Windows user profile on drive C. `Data` contains versioned durable projects, `Runtime` contains small runtime preferences, and `Cache` is disposable. Cache data is cleared on every normal exit and cleaned again on startup after an interrupted session.
+Raid keeps projects, source files, conversations, notes, and annotations under `RaidData/Data` beside the executable, so large durable data does not accumulate in the Windows profile on drive C. Electron retains only small settings and up to 128 MB of startup cache in the standard Windows location; conversion scratch data and the migrated legacy IndexedDB are cleared on normal exit.
 
-Current version: `1.0.0`.
+Current version: `1.1.0`.
 
 ## AI configuration
 
@@ -106,8 +106,8 @@ npm run desktop:pack
 ## Privacy and security
 
 - PDF rendering, text extraction, OCR, notes, annotations, and project storage run locally.
-- The configured AI service receives data only after an AI action: the selected material, generated document context, recent conversation messages, optional user memory, and up to four visual selections when applicable.
-- Project files and assets are stored locally in IndexedDB so projects can be restored. They are not uploaded unless included in an AI request.
+- The configured AI service receives data only after an AI action. Selection mode sends only the selection and two recent selection-chat turns; document mode may send generated document context, recent conversation messages, and optional user memory. Up to four visual selections may be sent when required.
+- Project files and assets are stored under `RaidData/Data/projects` beside the application so projects can be restored. They are not uploaded unless included in an AI request.
 - API settings remain in the local application data directory and are not included in the repository or installer, but they are not protected by an operating-system credential vault.
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.

@@ -34,15 +34,20 @@ export async function extractPdfText(pdf: PDFDocumentProxy, onProgress?: (done: 
       const height = Math.max(Math.hypot(transform[2], transform[3]), item.height || 1)
       return [{ text: item.str.trim(), x: transform[4], y: transform[5], width: Math.max(item.width * viewport.scale, 1), height }]
     })
-    const lines: Array<{ text: string; left: number; top: number; right: number; bottom: number; y: number; height: number }> = []
+    const lines: Array<{ text: string; left: number; top: number; right: number; bottom: number; y: number; height: number; column: number }> = []
     for (const word of words.sort((a, b) => a.y - b.y || a.x - b.x)) {
+      const wordColumn = word.x >= viewport.width * .5 ? 1 : 0
       let line: (typeof lines)[number] | undefined
       for (let lineIndex = lines.length - 1; lineIndex >= 0; lineIndex -= 1) {
-        if (Math.abs(lines[lineIndex].y - word.y) <= Math.max(2.5, Math.min(lines[lineIndex].height, word.height) * .45)) { line = lines[lineIndex]; break }
+        if (lines[lineIndex].column !== wordColumn) continue
+        if (Math.abs(lines[lineIndex].y - word.y) <= Math.max(2.5, Math.min(lines[lineIndex].height, word.height) * .45)) {
+          const horizontalGap = word.x - lines[lineIndex].right
+          if (horizontalGap <= Math.max(viewport.width * .035, word.height * 2.2)) { line = lines[lineIndex]; break }
+        }
         if (word.y - lines[lineIndex].y > word.height * 1.5) break
       }
       if (!line) {
-        lines.push({ text: word.text, left: word.x, top: word.y - word.height, right: word.x + word.width, bottom: word.y + word.height * .18, y: word.y, height: word.height })
+        lines.push({ text: word.text, left: word.x, top: word.y - word.height, right: word.x + word.width, bottom: word.y + word.height * .18, y: word.y, height: word.height, column: wordColumn })
         continue
       }
       line.text += `${word.x - line.right > Math.max(2, word.height * .12) ? ' ' : ''}${word.text}`
@@ -74,7 +79,7 @@ export async function extractPdfText(pdf: PDFDocumentProxy, onProgress?: (done: 
     const paragraphs: typeof lines = []
     for (const line of ordered) {
       const previous = paragraphs.at(-1)
-      const sameColumn = previous && Math.abs(previous.left - line.left) < viewport.width * .11
+      const sameColumn = previous && previous.column === line.column && Math.abs(previous.left - line.left) < viewport.width * .11
       const close = previous && line.y >= previous.y && line.y - previous.y <= Math.max(previous.height, line.height) * 1.9
       if (!previous || !sameColumn || !close) paragraphs.push({ ...line })
       else {

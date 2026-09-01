@@ -102,6 +102,10 @@ async function ensureDesktopMigration() {
   await migrationPromise
 }
 
+export async function migrateLegacyFileMemories() {
+  await ensureDesktopMigration()
+}
+
 export async function getFileMemory(id: string) {
   if (!window.readingAssistant) return getLegacyFileMemory(id)
   await ensureDesktopMigration()
@@ -131,7 +135,6 @@ export async function listFileMemoryRecords() {
 
 export async function listFileMemories(): Promise<FileMemorySummary[]> {
   if (window.readingAssistant) {
-    await ensureDesktopMigration()
     return await window.readingAssistant.listProjectMemorySummaries() as FileMemorySummary[]
   }
   const records = await listLegacyFileMemoryRecords()

@@ -36,6 +36,7 @@ type AnnotationPageProps = Pick<Props, 'annotationMode' | 'annotationTool' | 'an
 
 function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highlights, citationFocus, ...annotationProps }: { pdf: PDFDocumentProxy; pageNumber: number; zoom: number; inverted: boolean; textSelectionEnabled: boolean; highlights: DocumentHighlight[]; citationFocus: DocumentReference | null } & AnnotationPageProps) {
   const textLayerRef = useRef<HTMLDivElement>(null)
+  const citationLayerRef = useRef<HTMLDivElement>(null)
   const render = useCallback(async (canvas: HTMLCanvasElement) => {
     const page = await pdf.getPage(pageNumber)
     const displayViewport = page.getViewport({ scale: 0.82 * zoom })
@@ -76,7 +77,28 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
 
   const pageRegions = highlights.flatMap((highlight) => (highlight.regions || []).filter((item) => item.page === pageNumber).map((item) => ({ ...item.region, color: highlight.color })))
   const focusedRegion = citationFocus?.page === pageNumber ? citationFocus.region : null
-  return <SelectableCanvas pageNumber={pageNumber} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /></>} />
+  useEffect(() => {
+    if (!focusedRegion) return
+    let active = true
+    let frames = 0
+    const reveal = () => requestAnimationFrame(() => {
+      if (!active) return
+      const layer = citationLayerRef.current
+      const canvas = layer?.closest('.selectable-page')?.querySelector('canvas')
+      const marker = layer?.querySelector('i')
+      const reader = layer?.closest('.reader-scroll')
+      if (marker && reader && canvas?.width && canvas?.height) {
+        const markerBounds = marker.getBoundingClientRect()
+        const readerBounds = reader.getBoundingClientRect()
+        if (markerBounds.top < readerBounds.top + 30 || markerBounds.bottom > readerBounds.bottom - 30) marker.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' })
+      }
+      frames += 1
+      if (frames < 420) reveal()
+    })
+    reveal()
+    return () => { active = false }
+  }, [focusedRegion])
+  return <SelectableCanvas pageNumber={pageNumber} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div ref={citationLayerRef} className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /></>} />
 }
 
 function ImagePage({ source, zoom, inverted, ...annotationProps }: { source: SourceFile; zoom: number; inverted: boolean } & AnnotationPageProps) {
