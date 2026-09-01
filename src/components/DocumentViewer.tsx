@@ -21,7 +21,7 @@ type Props = {
   onPdfReady: (pdf: PDFDocumentProxy) => void
   onSelect: (selection: SelectionResult) => void
   onTextAi: (text: string) => void
-  onTextTranslate: (text: string, signal: AbortSignal) => Promise<string>
+  onTextTranslate: (text: string, signal: AbortSignal, onDelta: (delta: string) => void) => Promise<string>
   highlights: DocumentHighlight[]
   onHighlight: (highlight: Omit<DocumentHighlight, 'id'>) => void
   citationFocus: DocumentReference | null
@@ -375,7 +375,9 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     setTranslating(true)
     setTranslation('')
     try {
-      const result = await onTextTranslate(textAction.text, controller.signal)
+      const result = await onTextTranslate(textAction.text, controller.signal, (delta) => {
+        if (!controller.signal.aborted) setTranslation((current) => current + delta)
+      })
       if (!controller.signal.aborted) setTranslation(result)
     } catch (reason) {
       if (!controller.signal.aborted) setTranslation(reason instanceof Error ? reason.message : t('translatingFailed'))
@@ -428,7 +430,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       <button className="close-text-action" onClick={closeTextAction}><X size={14} /></button>
     </div>
     {(translating || translation) && <div className="inline-translation">
-      {translating ? <><LoaderCircle className="spin" size={15} /> {pack.code === 'en-US' ? 'Translating…' : '正在翻译…'}</> : <div className="inline-translation-markdown markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{translation}</ReactMarkdown></div>}
+      {translation ? <div className="inline-translation-markdown markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{translation}</ReactMarkdown>{translating && <LoaderCircle className="spin inline-stream-indicator" size={13} />}</div> : <><LoaderCircle className="spin" size={15} /> {pack.code === 'en-US' ? 'Translating…' : '正在翻译…'}</>}
     </div>}
   </div> : null
 

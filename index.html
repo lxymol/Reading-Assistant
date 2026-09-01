@@ -6,6 +6,15 @@
     <meta name="description" content="支持 PDF 和图片选区分析的 AI 阅读助手" />
     <link rel="icon" type="image/svg+xml" href="/app-icon.svg" />
     <title>Raid</title>
+    <script>
+      try {
+        if (localStorage.getItem('reading-assistant-theme') === 'dark') document.documentElement.dataset.theme = 'dark'
+      } catch { /* Theme storage must never block the first paint. */ }
+    </script>
+    <style>
+      html, body, #root { width: 100%; height: 100%; margin: 0; background: #f3f2ee; }
+      html[data-theme='dark'], html[data-theme='dark'] body, html[data-theme='dark'] #root { background: #1e1e1e; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

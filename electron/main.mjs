@@ -34,6 +34,13 @@ const dataManifestPath = path.join(raidDataPath, 'manifest.json')
 const storageSchemaVersion = 1
 const defaultUserDataPath = app.getPath('userData')
 const defaultSessionDataPath = app.getPath('sessionData')
+const chromiumDiskCacheLimit = 64 * 1024 * 1024
+const chromiumMediaCacheLimit = 16 * 1024 * 1024
+
+// Keep a small, warm Chromium profile on the system drive for fast launches.
+// Durable reader data is stored separately in RaidData/Data beside the app.
+app.commandLine.appendSwitch('disk-cache-size', String(chromiumDiskCacheLimit))
+app.commandLine.appendSwitch('media-cache-size', String(chromiumMediaCacheLimit))
 
 function moveLegacyRuntimeEntry(name, destination = path.join(runtimeDataPath, name)) {
   const source = path.join(raidDataPath, name)
@@ -47,8 +54,12 @@ moveLegacyRuntimeEntry('Chromium', sessionDataPath)
 moveLegacyRuntimeEntry('Code Cache')
 for (const directory of [raidDataPath, runtimeDataPath, durableDataPath, projectsDataPath, cacheDataPath, sessionDataPath, crashDataPath, conversionCachePath]) fs.mkdirSync(directory, { recursive: true })
 if (isDevelopmentInstance) {
-  app.setPath('userData', `${defaultUserDataPath}-test`)
-  app.setPath('sessionData', `${defaultSessionDataPath}-test`)
+  const testUserDataPath = `${defaultUserDataPath}-test`
+  const testSessionDataPath = `${defaultSessionDataPath}-test`
+  fs.mkdirSync(testUserDataPath, { recursive: true })
+  fs.mkdirSync(testSessionDataPath, { recursive: true })
+  app.setPath('userData', testUserDataPath)
+  app.setPath('sessionData', testSessionDataPath)
 }
 app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
@@ -307,27 +318,10 @@ function deleteProjectRecord(id) {
 
 writeDataManifest()
 
-function directorySize(directory) {
-  if (!fs.existsSync(directory)) return 0
-  let bytes = 0
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const absolutePath = path.join(directory, entry.name)
-    if (entry.isDirectory()) bytes += directorySize(absolutePath)
-    else if (entry.isFile()) bytes += fs.statSync(absolutePath).size
-  }
-  return bytes
-}
-
 async function maintainCachesOnExit() {
   if (readDataManifest().systemProfileProjectMigrationComplete) await session.defaultSession.clearData({ dataTypes: ['indexedDB'] }).catch(() => undefined)
-  const runtimeRoots = new Set([app.getPath('userData'), app.getPath('sessionData')])
-  const performanceCacheNames = ['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache']
-  const performanceCacheBytes = [...runtimeRoots].reduce((total, root) => total + performanceCacheNames.reduce((sum, name) => sum + directorySize(path.join(root, name)), 0), 0)
-  if (performanceCacheBytes > 128 * 1024 * 1024) {
-    await session.defaultSession.clearCache()
-    await session.defaultSession.clearCodeCaches({})
-    for (const root of runtimeRoots) for (const name of performanceCacheNames) fs.rmSync(path.join(root, name), { recursive: true, force: true })
-  }
+  // Performance caches are deliberately retained: Chromium enforces the size
+  // limits above, while keeping them warm avoids a cold start after every exit.
   fs.rmSync(conversionCachePath, { recursive: true, force: true })
   fs.mkdirSync(conversionCachePath, { recursive: true })
 }
@@ -342,6 +336,12 @@ ipcMain.handle('reading-assistant:delete-project-memory', (_event, id) => delete
 ipcMain.handle('reading-assistant:list-project-memory-summaries', () => listProjectSummaries())
 ipcMain.handle('reading-assistant:get-project-migration-status', () => Boolean(readDataManifest().systemProfileProjectMigrationComplete))
 ipcMain.handle('reading-assistant:complete-project-migration', () => { writeDataManifest({ legacyProjectMigrationComplete: true, systemProfileProjectMigrationComplete: true }); return true })
+ipcMain.handle('reading-assistant:open-external', async (_event, value) => {
+  const url = new URL(String(value || ''))
+  if (url.protocol !== 'https:') throw new Error('Only HTTPS links may be opened externally.')
+  await shell.openExternal(url.href)
+  return true
+})
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)
   return mainWindow && panelWindow && !panelWindow.isDestroyed() && panelWindow.getParentWindow() === mainWindow ? panelWindow : null
@@ -462,7 +462,7 @@ async function createWindow() {
     height: 940,
     minWidth: 520,
     minHeight: 480,
-    show: true,
+    show: false,
     title: isDevelopmentInstance ? 'Raid · Test' : 'Raid',
     backgroundColor: '#171a20',
     autoHideMenuBar: true,
@@ -475,6 +475,13 @@ async function createWindow() {
     },
   })
 
+  const showMainWindow = () => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
+    mainWindow.show()
+    logStartup('Main window shown')
+  }
+  mainWindow.once('ready-to-show', showMainWindow)
+  mainWindow.webContents.once('dom-ready', () => logStartup('Reader DOM ready'))
   mainWindow.setMenuBarVisibility(false)
   mainWindow.on('closed', () => {
     for (const zoneWindow of dockZoneWindows.values()) if (!zoneWindow.isDestroyed()) zoneWindow.destroy()
@@ -509,6 +516,7 @@ async function createWindow() {
     }
   })
   await mainWindow.loadURL(`http://127.0.0.1:${started.port}`)
+  showMainWindow()
   const importBridgeReady = await mainWindow.webContents.executeJavaScript("Boolean(window.readingAssistant?.selectSkillFolder && window.readingAssistant?.selectLanguageFolder && window.readingAssistant?.movePanelWindow)")
   logStartup(`Folder import bridge ready: ${importBridgeReady}`)
   console.log(`Raid folder import bridge: ${importBridgeReady ? 'ready' : 'unavailable'}`)

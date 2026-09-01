@@ -1,6 +1,7 @@
 import type { AiConfig, ImportedSkill, MemorySettings, PanelId, PanelLayout } from '../types'
 
 export const defaultAiConfig: AiConfig = {
+  provider: 'api',
   apiKey: '',
   baseUrl: '',
   model: '',
@@ -12,6 +13,9 @@ export const defaultAiConfig: AiConfig = {
   reasoningApiKey: '',
   reasoningBaseUrl: '',
   reasoningModel: '',
+  codexModel: '',
+  codexReasoningModel: '',
+  codexAgentEnabled: true,
 }
 
 const readJson = <T,>(key: string, fallback: T): T => {

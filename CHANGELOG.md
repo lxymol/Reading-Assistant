@@ -4,6 +4,27 @@ All notable changes to Raid are documented here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-02
+
+### Added
+
+- Added Codex-account connection alongside the existing OpenAI-compatible API configuration, including local sign-in status, model discovery, and separate default and reasoning models.
+- Added an optional restricted Codex Agent that can plan up to four steps and use Raid-controlled document search, current-time, and fixed-endpoint web-search tools without terminal, file-writing, code-editing, or desktop-control tools.
+- Added live LaTeX formula rendering to Markdown notes.
+
+### Changed
+
+- Both API and Codex answers now stream into the conversation as they are generated.
+- Empty-selection custom questions now behave as ordinary chat without silently attaching document text or summaries.
+- Streaming output follows the bottom only while the reader remains there; scrolling upward preserves the earlier reading position, while panel resizing deliberately returns to the latest message.
+- Simplified the Codex model settings and kept direct translation, explanation, insight, and summary actions on the faster non-Agent path.
+
+### Fixed
+
+- Fixed Codex login-state reuse and account-based model loading.
+- Fixed the white flash shown during desktop startup.
+- Preserved an assistant answer when its preceding user question is deleted.
+
 ## [1.1.0] - 2026-09-01
 
 ### Added

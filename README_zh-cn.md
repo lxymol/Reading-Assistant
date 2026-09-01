@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.1.0-3794ff)
+![Version](https://img.shields.io/badge/version-1.2.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid 是一款面向论文、教材和技术文档的轻量化项目式 AI 阅读器，集连续 PDF / 图片阅读、文字与跨页区域选择、OCR、Markdown 笔记、持久化批注以及用户自定义模型于一体。
@@ -16,9 +16,10 @@ Raid 是一款面向论文、教材和技术文档的轻量化项目式 AI 阅�
 - 将文件拖到主窗口任意位置即可创建项目
 - 文字或视觉区域选择
 - 彩色文本与墨迹批注
-- 实时 Markdown 笔记，支持粘贴图片、智能裁边墨迹和 Markdown 导出
+- 实时 Markdown 与 LaTeX 公式笔记，支持粘贴图片、智能裁边墨迹和 Markdown 导出
 - 不同组件侧边栏停靠，浮动窗口转换
-- 对选区或全文进行 AI 问答，全文回复包含简洁页码标签，多种模型可自行配置
+- 可通过 OpenAI 兼容 API 或已登录的 Codex 账户进行流式 AI 问答，并分别配置默认模型与深度思考模型
+- 可选受限 Codex Agent 模式，支持任务拆分以及由 Raid 控制的文档检索、时间查询和联网搜索
 - 支持导入 Skill 和语言包、自动 Skill 路由，以及显式 `/skill-command` 选择
 - 支持多项目历史记忆与用户画像管理
 - 支持系统分屏的窄窗口布局与缓存清理
@@ -42,6 +43,10 @@ Raid 使用检索增强上下文，但不依赖向量数据库：
 
 这种方式让选区操作保持轻量快速，同时兼顾全文问题的覆盖面和大型文件下的上下文可控性。
 
+### 受限 Codex Agent
+
+选择 Codex 接入并开启“受限 Agent 模式”后，自定义问题可以被拆分为最多 4 个工具步骤。实际工具由 Raid 执行，白名单仅包含文档检索、当前时间和固定入口联网搜索；所有参数都会校验，搜索结果按不可信参考数据处理。Agent 不会获得终端、文件写入、代码修改或电脑控制工具。翻译、解释、摘要等直接操作仍使用更快的单次请求路径。
+
 ## 记忆方法
 
 Raid 包含两种不同的本地记忆：
@@ -57,11 +62,11 @@ Windows 用户可从 [GitHub Releases](https://github.com/lxymol/Reading-Assista
 
 Raid 将项目、源文件、对话、笔记和批注放在程序旁边的 `RaidData/Data`，不会把这些大体积资料堆积到 C 盘。Electron 仅在 Windows 用户目录保留少量运行设置和不超过 128 MB 的启动加速缓存；转换临时文件和迁移完成后的旧 IndexedDB 会在正常关闭时清理。
 
-当前版本：`1.1.0`。
+当前版本：`1.2.0`。
 
 ## AI 配置
 
-打开“设置 → 模型设置”，填写 API 接口地址、模型名称和 API Key。Raid 不预设服务商。
+打开“设置 → 模型设置”，可选择 OpenAI 兼容 API，或复用电脑上已经登录的 Codex 账户。API 模式使用自定义接口和 Key；Codex 模式从本机 Codex 登录状态获取可用 GPT 模型。两种接入方式均采用流式输出。
 
 | 配置 | 用途 |
 | --- | --- |
@@ -73,6 +78,8 @@ Raid 将项目、源文件、对话、笔记和批注放在程序旁边的 `Raid
 
 - `GET /models`
 - `POST /chat/completions`
+
+流式生成期间，只有对话原本位于底部时才会自动跟随最新内容；向上滚动后不会被强制拉回。调整助手栏高度或窗口尺寸时会重新保持最新消息可见。
 
 ## Skill 与语言包
 

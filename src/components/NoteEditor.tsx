@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { Download, PenLine, RotateCcw } from 'lucide-react'
 
 type Props = { fileName: string; value: string; onChange: (value: string) => void; assets: Record<string, string>; onAssetsChange: (assets: Record<string, string>) => void }
@@ -160,7 +162,7 @@ export default function NoteEditor({ fileName, value, onChange, assets, onAssets
       <button onClick={() => setInking(true)}><PenLine size={14} />墨迹</button>
       <button onClick={download}><Download size={14} />导出</button>
     </div></header>
-    <div className="note-live" ref={noteLiveRef} style={{ gridTemplateRows: `minmax(68px, ${splitRatio}fr) 7px minmax(68px, ${1 - splitRatio}fr)` }}><textarea ref={sourceRef} value={value} onChange={(e) => onChange(e.target.value)} onPaste={paste} placeholder="Markdown" /><div className="note-split-resizer" role="separator" aria-label="调整源码与预览高度" aria-orientation="horizontal" title="拖动调整源码与预览高度" onPointerDown={startSplit} onPointerMove={moveSplit} onPointerUp={stopSplit} onPointerCancel={stopSplit} /><div className="note-preview" ref={previewRef}><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url.startsWith('asset:') ? assets[url.slice(6)] || '' : url}>{value || '*暂无笔记*'}</ReactMarkdown></div></div>
+    <div className="note-live" ref={noteLiveRef} style={{ gridTemplateRows: `minmax(68px, ${splitRatio}fr) 7px minmax(68px, ${1 - splitRatio}fr)` }}><textarea ref={sourceRef} value={value} onChange={(e) => onChange(e.target.value)} onPaste={paste} placeholder="Markdown" /><div className="note-split-resizer" role="separator" aria-label="调整源码与预览高度" aria-orientation="horizontal" title="拖动调整源码与预览高度" onPointerDown={startSplit} onPointerMove={moveSplit} onPointerUp={stopSplit} onPointerCancel={stopSplit} /><div className="note-preview markdown" ref={previewRef}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={(url) => url.startsWith('asset:') ? assets[url.slice(6)] || '' : url}>{value || '*暂无笔记*'}</ReactMarkdown></div></div>
     {inking && <div className="ink-editor"><div className="ink-toolbar"><span /><button onClick={() => { const c = canvasRef.current; if (c) prepareCanvas(c) }}><RotateCcw size={14} />清空</button><button onClick={insertInk}>插入笔记</button><button onClick={() => setInking(false)}>取消</button></div><canvas ref={canvasRef} onPointerDown={startInk} onPointerMove={moveInk} onPointerUp={() => { drawing.current = false }} /></div>}
   </section>
 }

@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('readingAssistant', {
   listProjectMemorySummaries: () => ipcRenderer.invoke('reading-assistant:list-project-memory-summaries'),
   getProjectMigrationStatus: () => ipcRenderer.invoke('reading-assistant:get-project-migration-status'),
   completeProjectMigration: () => ipcRenderer.invoke('reading-assistant:complete-project-migration'),
+  openExternal: (url) => ipcRenderer.invoke('reading-assistant:open-external', url),
   movePanelWindow: (id, x, y) => ipcRenderer.send('reading-assistant:move-panel-window', { id, x, y }),
   preparePanelDrag: () => ipcRenderer.send('reading-assistant:prepare-panel-drag'),
   setPanelDragging: (active) => ipcRenderer.send('reading-assistant:set-panel-dragging', { active }),

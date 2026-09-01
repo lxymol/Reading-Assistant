@@ -56,6 +56,40 @@ const normalizeAssistantMarkdown = (content: string, citationsDisabled = false, 
   })
   .replace(/\\?\[\\?\[\s*PAGE\s*:\s*(\d+)\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
 
+type AiStreamEvent = { type: 'delta'; delta: string } | { type: 'done'; content: string; references?: ChatReference[]; model?: string; skillName?: string } | { type: 'error'; error: string }
+type AiDoneEvent = Extract<AiStreamEvent, { type: 'done' }>
+
+const readAiStream = async (response: Response, onEvent: (event: AiStreamEvent) => void): Promise<AiDoneEvent> => {
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    throw new Error(data.error || `AI request failed (${response.status})`)
+  }
+  if (!response.body) throw new Error('AI response stream is unavailable.')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let doneEvent: AiDoneEvent | null = null
+  const processLine = (line: string) => {
+    if (!line.trim()) return
+    let event: AiStreamEvent
+    try { event = JSON.parse(line) as AiStreamEvent } catch { return }
+    if (event.type === 'error') throw new Error(event.error)
+    if (event.type === 'done') doneEvent = event
+    onEvent(event)
+  }
+  while (true) {
+    const next = await reader.read()
+    buffer += decoder.decode(next.value || new Uint8Array(), { stream: !next.done })
+    const lines = buffer.split(/\r?\n/)
+    buffer = next.done ? '' : lines.pop() || ''
+    for (const line of lines) processLine(line)
+    if (next.done) break
+  }
+  if (buffer) processLine(buffer)
+  if (!doneEvent) throw new Error('AI response ended before completion.')
+  return doneEvent as AiDoneEvent
+}
+
 const recentSelectionHistory = (messages: ChatMessage[]) => {
   let inferredMode: ChatMessage['contextMode']
   return messages.map((message) => {
@@ -142,6 +176,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const showOcrProgressRef = useRef(false)
   const resultsEndRef = useRef<HTMLDivElement>(null)
   const panelScrollRef = useRef<HTMLDivElement>(null)
+  const chatAutoFollowRef = useRef(true)
+  const chatWasStreamingRef = useRef(false)
   const readerScrollRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
   const citationNavigationRef = useRef<{ page: number; until: number } | null>(null)
@@ -401,8 +437,36 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     const container = panelScrollRef.current
-    if (container) container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
-  }, [history, busy])
+    const wasStreaming = chatWasStreamingRef.current
+    chatWasStreamingRef.current = currentAiBusy
+    if (!container) return
+    if (currentAiBusy && !chatAutoFollowRef.current) return
+    if (!currentAiBusy && wasStreaming && !chatAutoFollowRef.current) return
+    window.requestAnimationFrame(() => {
+      const latest = panelScrollRef.current
+      if (latest) latest.scrollTop = latest.scrollHeight
+    })
+  }, [history, busy, currentAiBusy])
+
+  useEffect(() => {
+    if (!panelLayouts.chat.open) return
+    chatAutoFollowRef.current = true
+    window.requestAnimationFrame(() => {
+      const container = panelScrollRef.current
+      if (container) container.scrollTop = container.scrollHeight
+    })
+  }, [promptHeight, leftDockWidth, rightDockWidth, panelLayouts.chat.open, panelLayouts.chat.dock, panelLayouts.chat.height, panelLayouts.chat.dockSize])
+
+  useEffect(() => {
+    const container = panelScrollRef.current
+    if (!container) return
+    const trackPosition = () => {
+      chatAutoFollowRef.current = container.scrollHeight - container.scrollTop - container.clientHeight <= 24
+    }
+    trackPosition()
+    container.addEventListener('scroll', trackPosition, { passive: true })
+    return () => container.removeEventListener('scroll', trackPosition)
+  }, [panelLayouts.chat.open, panelLayouts.chat.dock])
 
   const snapshotCurrent = (): WorkArea | null => source && activeWorkAreaId ? {
     id: activeWorkAreaId, memoryKey: getFileMemoryId(source.file), source, pdf, documentText, selectedText, selections,
@@ -951,23 +1015,28 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
     const taskKey = `${workspaceId}:${conversationId}`
     if (aiTasks.has(taskKey)) return
-    const targetIsDocument = scope === 'document' || !selectionReady
+    chatAutoFollowRef.current = true
+    const targetIsDocument = scope === 'document'
     const selectionImages = targetIsDocument ? [] : selections.flatMap((item) => item.images).slice(0, 4)
     const selectionUsesText = !targetIsDocument && Boolean(selectedText.trim())
     const fastSelectionTranslation = selectionUsesText && action === 'translate'
     const requestImages = selectionUsesText ? [] : selectionImages
     const reasoningActive = deepThinking && aiConfig.reasoningEnabled
     const actionLabel = (requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId)?.name : effectiveInstruction) || ({ translate: t('translate'), explain: t('explain'), insight: t('insight'), summarize: t('summarize'), custom: 'AI' }[action])
-    const userLabel = `${targetIsDocument ? t('documentScope') : t('selectedScope')} · ${actionLabel}`
-    const targetText = targetIsDocument ? (documentText || source.name) : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
+    const emptySelectionChat = !targetIsDocument && !selectionUsesText && selectionImages.length === 0 && action === 'custom' && Boolean(effectiveInstruction)
+    const userLabel = emptySelectionChat ? t('selectedScope') : `${targetIsDocument ? t('documentScope') : t('selectedScope')} · ${actionLabel}`
+    const targetText = targetIsDocument ? (documentText || source.name) : emptySelectionChat ? effectiveInstruction : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
     const contextMode: ChatMessage['contextMode'] = targetIsDocument ? 'document' : 'selection'
     const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, contextMode, label: userLabel, sourcePage: currentPage }
+    const assistantId = makeId()
+    const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', contextMode, citationsDisabled: !targetIsDocument }
     const requestHistory = [...previousHistory, userMessage]
-    setHistory(requestHistory)
+    const visibleHistory = [...requestHistory, assistantMessage]
+    setHistory(visibleHistory)
     setConversations((items) => items.map((item) => item.id === conversationId ? {
       ...item,
       title: item.history.length ? item.title : actionLabel.slice(0, 32),
-      history: requestHistory,
+      history: visibleHistory,
     } : item))
     setAiTasks((items) => new Set(items).add(taskKey))
     const requestController = new AbortController()
@@ -999,15 +1068,21 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           requestedSkillId,
         }),
       })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.error || t('requestFailed'))
-      const assistantMessage: ChatMessage = { id: makeId(), role: 'assistant', content: data.content, contextMode, label: data.skillName ? `${t('skillUsed')} · ${data.skillName}` : undefined, references: targetIsDocument && Array.isArray(data.references) ? data.references : undefined, citationsDisabled: !targetIsDocument }
-      updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: [...conversation.history, assistantMessage] }))
-      learnUserMemory(effectiveInstruction || actionLabel, data.content)
+      let streamedContent = ''
+      const done = await readAiStream(response, (event) => {
+        if (event.type === 'delta') {
+          streamedContent += event.delta
+          updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: streamedContent } : message) }))
+        }
+        if (event.type === 'done') {
+          streamedContent = event.content
+          updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetIsDocument && Array.isArray(event.references) ? event.references : undefined } : message) }))
+        }
+      })
+      learnUserMemory(effectiveInstruction || actionLabel, done.content)
     } catch (reason) {
       const message = requestController.signal.aborted ? (pack.code === 'en-US' ? 'Generation stopped.' : '已停止生成。') : reason instanceof Error ? reason.message : t('processFailed')
-      const errorMessage: ChatMessage = { id: makeId(), role: 'assistant', content: `⚠️ ${message}`, contextMode, citationsDisabled: !targetIsDocument }
-      updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: [...conversation.history, errorMessage] }))
+      updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((item) => item.id === assistantId ? { ...item, content: item.content ? `${item.content}\n\n⚠️ ${message}` : `⚠️ ${message}` } : item) }))
     } finally {
       abortControllersRef.current.delete(taskKey)
       setAiTasks((items) => { const next = new Set(items); next.delete(taskKey); return next })
@@ -1052,7 +1127,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setPanelLayouts((items) => ({ ...items, chat: { ...items.chat, open: true, z: nextPanelZ(items) } }))
   }
 
-  const translateTextInline = async (text: string, signal: AbortSignal) => {
+  const translateTextInline = async (text: string, signal: AbortSignal, onDelta: (delta: string) => void) => {
     const response = await fetch('/api/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1068,9 +1143,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         responseLanguage: pack.aiLanguage,
       }),
     })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.error || t('translatingFailed'))
-    return String(data.content || '')
+    const done = await readAiStream(response, (event) => { if (event.type === 'delta') onDelta(event.delta) })
+    return done.content
   }
 
   const statusText = useMemo(() => {
@@ -1160,10 +1234,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const chatContent = <div className="chat-panel-layout">
     <section className="ai-fixed-controls">
       <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button></div>
-      <div className="action-grid"><button disabled={!!busy || currentAiBusy} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
+      <div className="action-grid"><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
     </section>
-    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-heading"><span><Sparkles size={15} /> {message.label || t('aiAnalysis')}</span><div><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform} components={{ a: ({ href, children }) => href?.startsWith('#raid-citation-page-') ? <span className="citation-page-label">{children}</span> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content, message.citationsDisabled, message.references, documentText)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
-    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{!aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'document' || !selectionReady ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
+    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-actions"><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform} components={{ a: ({ href, children }) => href?.startsWith('#raid-citation-page-') ? <span className="citation-page-label">{children}</span> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content, message.citationsDisabled, message.references, documentText)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
+    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
   const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, notes: source ? <NoteEditor fileName={source.name} value={note} onChange={setNote} assets={noteAssets} onAssetsChange={setNoteAssets} /> : null }

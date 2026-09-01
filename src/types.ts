@@ -37,6 +37,7 @@ export type ChatReference = {
 }
 
 export type AiConfig = {
+  provider: 'api' | 'codex'
   apiKey: string
   baseUrl: string
   model: string
@@ -48,6 +49,9 @@ export type AiConfig = {
   reasoningApiKey: string
   reasoningBaseUrl: string
   reasoningModel: string
+  codexModel: string
+  codexReasoningModel: string
+  codexAgentEnabled: boolean
 }
 
 export type ImportedSkill = {
@@ -166,6 +170,7 @@ declare global {
       listProjectMemorySummaries: () => Promise<Array<Record<string, unknown>>>
       getProjectMigrationStatus: () => Promise<boolean>
       completeProjectMigration: () => Promise<boolean>
+      openExternal: (url: string) => Promise<boolean>
       movePanelWindow: (id: string, x: number, y: number) => void
       preparePanelDrag: () => void
       setPanelDragging: (active: boolean) => void

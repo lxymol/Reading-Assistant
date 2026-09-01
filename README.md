@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.1.0-3794ff)
+![Version](https://img.shields.io/badge/version-1.2.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid is a lightweight, project-oriented AI reader for papers, textbooks, and technical documents. It combines continuous PDF/image reading, text and cross-page area selection, OCR, Markdown notes, persistent annotations, and user-configured models.
@@ -16,9 +16,10 @@ Raid is a lightweight, project-oriented AI reader for papers, textbooks, and tec
 - Drag a file anywhere onto the main window to create a project
 - Text or visual-region selection
 - Colored text and ink annotations
-- Live Markdown notes with pasted images, smart-cropped ink, and Markdown export
+- Live Markdown and LaTeX notes with pasted images, smart-cropped ink, and Markdown export
 - Dockable component sidebars and detachable floating windows
-- AI Q&A for selections or complete documents, with compact page labels in document answers and support for multiple user-configured models
+- Streaming AI Q&A through an OpenAI-compatible API or a signed-in Codex account, with independent default and reasoning models
+- Optional restricted Codex Agent mode with task planning and Raid-controlled document search, current-time, and web-search tools
 - Importable Skills and language packs, automatic Skill routing, and explicit `/skill-command` selection
 - Multi-project history memory and user-profile management
 - Split-screen-friendly narrow layout and drag-to-reorder navigation tools
@@ -42,6 +43,10 @@ Raid uses retrieval-augmented context, but it does not require a vector database
 
 This strategy keeps selection operations lightweight while preserving broad coverage for whole-document questions and predictable behavior on large files.
 
+### Restricted Codex Agent
+
+When Codex connection and **Restricted agent mode** are enabled, custom questions may be split into as many as four tool steps. Raid—not Codex—executes a small allowlist of document search, current-time lookup, and fixed-endpoint web search. Tool inputs are validated and search results are treated as untrusted reference data. The agent is not given terminal, file-writing, code-editing, or desktop-control tools. Translation, explanation, summary, and other direct actions keep the faster single-request path.
+
 ## Memory model
 
 Raid has two distinct local memory layers:
@@ -57,11 +62,11 @@ Download the Windows installer from [GitHub Releases](https://github.com/lxymol/
 
 Raid keeps projects, source files, conversations, notes, and annotations under `RaidData/Data` beside the executable, so large durable data does not accumulate in the Windows profile on drive C. Electron retains only small settings and up to 128 MB of startup cache in the standard Windows location; conversion scratch data and the migrated legacy IndexedDB are cleared on normal exit.
 
-Current version: `1.1.0`.
+Current version: `1.2.0`.
 
 ## AI configuration
 
-Open **Settings → Model settings** and enter an API base URL, model name, and API key. Raid does not include provider presets.
+Open **Settings → Model settings** and choose either an OpenAI-compatible API or a Codex account already signed in on the computer. API mode uses the configured endpoint and key; Codex mode discovers available GPT models from the local Codex sign-in. Both modes stream output as it is generated.
 
 | Configuration | Purpose |
 | --- | --- |
@@ -73,6 +78,8 @@ Advanced configurations inherit the default endpoint and key when left blank. Th
 
 - `GET /models`
 - `POST /chat/completions`
+
+During streaming, Raid follows the newest text only while the conversation is already at the bottom. Scrolling upward pauses automatic following; resizing the assistant panel returns it to the latest message.
 
 ## Skills and language packs
 
