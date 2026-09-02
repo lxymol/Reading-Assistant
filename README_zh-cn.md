@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.2.0-3794ff)
+![Version](https://img.shields.io/badge/version-1.3.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid 是一款面向论文、教材和技术文档的轻量化项目式 AI 阅读器，集连续 PDF / 图片阅读、文字与跨页区域选择、OCR、Markdown 笔记、持久化批注以及用户自定义模型于一体。
@@ -62,7 +62,7 @@ Windows 用户可从 [GitHub Releases](https://github.com/lxymol/Reading-Assista
 
 Raid 将项目、源文件、对话、笔记和批注放在程序旁边的 `RaidData/Data`，不会把这些大体积资料堆积到 C 盘。Electron 仅在 Windows 用户目录保留少量运行设置和不超过 128 MB 的启动加速缓存；转换临时文件和迁移完成后的旧 IndexedDB 会在正常关闭时清理。
 
-当前版本：`1.2.0`。
+当前版本：`1.3.0`。
 
 ## AI 配置
 

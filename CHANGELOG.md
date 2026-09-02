@@ -4,6 +4,20 @@ All notable changes to Raid are documented here.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-02
+
+### Changed
+
+- Standardized API and Codex answers as directly rendered Markdown, including consistent delimiters for inline and display mathematics.
+- Trackpad PDF zoom now keeps the active page and the pointer's location within that page stable.
+- Chat streaming follows the latest output only until the reader scrolls upward; docked and floating assistant panels both preserve the chosen reading position.
+
+### Fixed
+
+- Fixed long display equations being clipped or broken across lines; oversized formulas can now be inspected horizontally.
+- Fixed page and zoom fields rejecting multi-digit manual input before editing was complete.
+- Added clear icon-only copy confirmation to assistant messages.
+
 ## [1.2.0] - 2026-09-02
 
 ### Added

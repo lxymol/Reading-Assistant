@@ -164,7 +164,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .ai-fixed-controls .action-grid button { min-height: 48px; padding: 6px 3px; gap: 3px; border-radius: 7px; }
 .ai-fixed-controls .action-grid button svg { width: 14px; height: 14px; }
 .ai-fixed-controls .action-grid button span { font-size: 9px; }
-.panel-scroll { min-height: 0; flex: 1; padding: 12px 14px 10px; overflow-y: auto; }
+.panel-scroll { min-height: 0; flex: 1; padding: 12px 14px 10px; overflow-y: auto; overflow-anchor:none; }
 .section-label { margin-bottom: 9px; display: flex; justify-content: space-between; align-items: center; }
 .section-label button { padding: 2px; display: flex; align-items: center; gap: 4px; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 10px; }
 .selection-strip { margin-bottom: 8px; display: flex; gap: 7px; overflow-x: auto; padding-bottom: 3px; }
@@ -185,11 +185,12 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 .user-event { padding: 8px 10px; border-left: 2px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; }
 .user-event span { display: block; font-size: 11px; font-weight: 700; }
 .user-event small { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.answer-card { position:relative; border:0; border-radius:0; background:transparent; overflow:visible; }
+.answer-card { position:relative; min-width:0; border:0; border-radius:0; background:transparent; overflow:visible; }
 .answer-card > .markdown { padding:8px 32px 12px 2px; }
 .answer-actions { position:absolute; z-index:1; top:5px; right:2px; display:flex; opacity:.55; transition:opacity .15s; }
 .answer-card:hover .answer-actions { opacity:1; }
-.answer-actions button { padding:3px; border:0; background:none; color:var(--muted); cursor:pointer; }
+.answer-actions button { position:relative; padding:3px; border:0; background:none; color:var(--muted); cursor:pointer; }
+.answer-actions button.copied { color:var(--accent); }
 .markdown { padding: 11px 13px; color: var(--text); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
@@ -204,7 +205,9 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 .markdown th, .markdown td { min-width: 72px; padding: 6px 8px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
 .markdown th { background: var(--soft); }
 .markdown img { max-width: 100%; }
-.markdown .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 3px 0; }
+.markdown .katex,.markdown .katex * { overflow-wrap:normal; word-break:normal; }
+.markdown .katex-display { display:block; width:100%; max-width:100%; margin:9px 0; padding:4px 0 7px; overflow-x:auto; overflow-y:hidden; scrollbar-width:thin; }
+.markdown .katex-display > .katex { display:block; width:max-content; min-width:100%; text-align:center; }
 .error-banner { margin-top: 10px; padding: 9px 10px; display: flex; align-items: flex-start; gap: 7px; color: #a53931; background: #fff0ee; border: 1px solid #efc3bf; border-radius: 8px; font-size: 11px; line-height: 1.45; }
 :root[data-theme='dark'] .error-banner { background: #3a1d1b; border-color: #63302c; color: #ffaaa3; }
 .prompt-area { position: relative; flex: none; padding: 10px 16px 13px; border-top: 1px solid var(--line); background: var(--panel); }

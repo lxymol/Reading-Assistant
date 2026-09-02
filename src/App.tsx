@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import type { Worker as OcrWorker } from 'tesseract.js'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
@@ -7,7 +7,7 @@ import remarkGfm from 'remark-gfm'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import {
-  BrainCircuit, ChevronLeft, ChevronRight, Copy, FileText, Languages, FolderOpen,
+  BrainCircuit, Check, ChevronLeft, ChevronRight, Copy, FileText, Languages, FolderOpen,
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
   Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, StickyNote, Square,
 } from 'lucide-react'
@@ -55,6 +55,21 @@ const normalizeAssistantMarkdown = (content: string, citationsDisabled = false, 
     return page ? `[${page}](#raid-citation-page-${page})` : ''
   })
   .replace(/\\?\[\\?\[\s*PAGE\s*:\s*(\d+)\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
+
+function CopyMessageButton({ content, copyLabel }: { content: string; copyLabel: string }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<number | null>(null)
+  useEffect(() => () => { if (timerRef.current !== null) window.clearTimeout(timerRef.current) }, [])
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopied(true)
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+      timerRef.current = window.setTimeout(() => setCopied(false), 1600)
+    } catch { /* Clipboard permission errors leave the button unchanged. */ }
+  }
+  return <button className={copied ? 'copied' : ''} onClick={() => void copy()} title={copyLabel}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>
+}
 
 type AiStreamEvent = { type: 'delta'; delta: string } | { type: 'done'; content: string; references?: ChatReference[]; model?: string; skillName?: string } | { type: 'error'; error: string }
 type AiDoneEvent = Extract<AiStreamEvent, { type: 'done' }>
@@ -133,6 +148,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [customPrompt, setCustomPrompt] = useState('')
   const [zoom, setZoom] = useState(1)
   const [currentPage, setCurrentPage] = useState(1)
+  const [pageInput, setPageInput] = useState('1')
+  const [zoomInput, setZoomInput] = useState('100')
   const [areaSelectionEnabled, setAreaSelectionEnabled] = useState(false)
   const [scope, setScope] = useState<'selection' | 'document'>('selection')
   const [dark, setDark] = useState(loadDarkTheme)
@@ -177,10 +194,14 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const resultsEndRef = useRef<HTMLDivElement>(null)
   const panelScrollRef = useRef<HTMLDivElement>(null)
   const chatAutoFollowRef = useRef(true)
+  const chatFollowSuspendedRef = useRef(false)
   const chatWasStreamingRef = useRef(false)
+  const chatPinnedScrollTopRef = useRef(0)
+  const chatLastScrollTopRef = useRef(0)
   const readerScrollRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
   const citationNavigationRef = useRef<{ page: number; until: number } | null>(null)
+  const zoomPageLockRef = useRef<{ page: number; until: number } | null>(null)
   const resizeRef = useRef<
     | { kind: 'panel'; panel: 'left' | 'right'; startX: number; startWidth: number }
     | { kind: 'dock-split'; first: PanelId; second: PanelId; startY: number; firstSize: number; secondSize: number; containerHeight: number; bottomLocks: HTMLElement[] }
@@ -314,6 +335,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   useEffect(() => { activeWorkAreaIdRef.current = activeWorkAreaId }, [activeWorkAreaId])
   useEffect(() => { activeConversationIdRef.current = activeConversationId }, [activeConversationId])
   useEffect(() => { selectionsRef.current = selections }, [selections])
+  useEffect(() => { const timer = window.setTimeout(() => setPageInput(String(currentPage)), 0); return () => window.clearTimeout(timer) }, [currentPage])
+  useEffect(() => { const timer = window.setTimeout(() => setZoomInput(String(Math.round(zoom * 100))), 0); return () => window.clearTimeout(timer) }, [zoom])
 
   useEffect(() => {
     const persistentLayouts = Object.fromEntries(Object.entries(panelLayouts).map(([id, layout]) => [id, { ...layout, dockSize: 1 }]))
@@ -435,38 +458,57 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => () => { workerRef.current?.terminate() }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = panelScrollRef.current
     const wasStreaming = chatWasStreamingRef.current
     chatWasStreamingRef.current = currentAiBusy
     if (!container) return
+    if (chatFollowSuspendedRef.current && (currentAiBusy || wasStreaming)) {
+      container.scrollTop = Math.min(chatPinnedScrollTopRef.current, Math.max(0, container.scrollHeight - container.clientHeight))
+      chatLastScrollTopRef.current = container.scrollTop
+      return
+    }
     if (currentAiBusy && !chatAutoFollowRef.current) return
     if (!currentAiBusy && wasStreaming && !chatAutoFollowRef.current) return
-    window.requestAnimationFrame(() => {
-      const latest = panelScrollRef.current
-      if (latest) latest.scrollTop = latest.scrollHeight
-    })
+    container.scrollTop = container.scrollHeight
+    chatLastScrollTopRef.current = container.scrollTop
   }, [history, busy, currentAiBusy])
 
   useEffect(() => {
     if (!panelLayouts.chat.open) return
+    chatFollowSuspendedRef.current = false
     chatAutoFollowRef.current = true
     window.requestAnimationFrame(() => {
       const container = panelScrollRef.current
-      if (container) container.scrollTop = container.scrollHeight
+      if (container) {
+        container.scrollTop = container.scrollHeight
+        chatLastScrollTopRef.current = container.scrollTop
+      }
     })
   }, [promptHeight, leftDockWidth, rightDockWidth, panelLayouts.chat.open, panelLayouts.chat.dock, panelLayouts.chat.height, panelLayouts.chat.dockSize])
 
-  useEffect(() => {
-    const container = panelScrollRef.current
-    if (!container) return
-    const trackPosition = () => {
-      chatAutoFollowRef.current = container.scrollHeight - container.scrollTop - container.clientHeight <= 24
+  const stopFollowingOnUpwardWheel = (container: HTMLDivElement, deltaY: number, deltaMode: number) => {
+    if (deltaY >= 0) return
+    chatFollowSuspendedRef.current = true
+    chatAutoFollowRef.current = false
+    const multiplier = deltaMode === 1 ? 16 : deltaMode === 2 ? container.clientHeight : 1
+    chatPinnedScrollTopRef.current = Math.max(0, container.scrollTop + deltaY * multiplier)
+  }
+
+  const trackChatPosition = (container: HTMLDivElement) => {
+    const top = container.scrollTop
+    const movedUp = top < chatLastScrollTopRef.current - .5
+    chatLastScrollTopRef.current = top
+    if (chatWasStreamingRef.current && movedUp) {
+      chatFollowSuspendedRef.current = true
+      chatAutoFollowRef.current = false
     }
-    trackPosition()
-    container.addEventListener('scroll', trackPosition, { passive: true })
-    return () => container.removeEventListener('scroll', trackPosition)
-  }, [panelLayouts.chat.open, panelLayouts.chat.dock])
+    if (chatFollowSuspendedRef.current && chatWasStreamingRef.current) {
+      chatPinnedScrollTopRef.current = top
+      return
+    }
+    chatAutoFollowRef.current = container.scrollHeight - top - container.clientHeight <= 24
+  }
 
   const snapshotCurrent = (): WorkArea | null => source && activeWorkAreaId ? {
     id: activeWorkAreaId, memoryKey: getFileMemoryId(source.file), source, pdf, documentText, selectedText, selections,
@@ -697,12 +739,34 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return true
   }
 
+  const commitPageInput = () => {
+    const value = Number(pageInput)
+    if (!Number.isFinite(value) || !pageInput.trim()) return setPageInput(String(currentPage))
+    const page = Math.max(1, Math.min(pdf?.numPages || 1, Math.round(value)))
+    setPageInput(String(page))
+    jumpToPage(page)
+  }
+
+  const commitZoomInput = () => {
+    const value = Number(zoomInput)
+    if (!Number.isFinite(value) || !zoomInput.trim()) return setZoomInput(String(Math.round(zoom * 100)))
+    const percentage = Math.max(25, Math.min(500, Math.round(value)))
+    setZoomInput(String(percentage))
+    setZoom(percentage / 100)
+  }
+
   const onReaderScroll = () => {
     if (scrollFrameRef.current !== null) return
     scrollFrameRef.current = requestAnimationFrame(() => {
       scrollFrameRef.current = null
       const container = readerScrollRef.current
       if (!container) return
+      const zoomLock = zoomPageLockRef.current
+      if (zoomLock && Date.now() < zoomLock.until) {
+        if (currentPage !== zoomLock.page) setCurrentPage(zoomLock.page)
+        return
+      }
+      zoomPageLockRef.current = null
       const navigation = citationNavigationRef.current
       if (navigation && Date.now() < navigation.until) {
         setCurrentPage(navigation.page)
@@ -732,15 +796,25 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const previousZoom = zoom
     const nextZoom = Math.max(.25, Math.min(5, previousZoom * Math.exp(-event.deltaY * .0025)))
     if (!container || !bounds || Math.abs(nextZoom - previousZoom) < .001) return
-    const anchorX = event.clientX - bounds.left
-    const anchorY = event.clientY - bounds.top
-    const contentX = container.scrollLeft + anchorX
-    const contentY = container.scrollTop + anchorY
+    const lockedPage = currentPage
+    const page = container.querySelector<HTMLElement>(`[data-page-number="${lockedPage}"]`)
+    const pageBounds = page?.getBoundingClientRect()
+    const clientX = event.clientX
+    const clientY = event.clientY
+    const clampUnit = (value: number) => Math.max(0, Math.min(1, value))
+    const relativeX = pageBounds?.width ? clampUnit((clientX - pageBounds.left) / pageBounds.width) : .5
+    const relativeY = pageBounds?.height ? clampUnit((clientY - pageBounds.top) / pageBounds.height) : .38
+    zoomPageLockRef.current = { page: lockedPage, until: Date.now() + 260 }
     setZoom(nextZoom)
     requestAnimationFrame(() => {
-      const ratio = nextZoom / previousZoom
-      container.scrollLeft = contentX * ratio - anchorX
-      container.scrollTop = contentY * ratio - anchorY
+      requestAnimationFrame(() => {
+        const resizedPage = container.querySelector<HTMLElement>(`[data-page-number="${lockedPage}"]`)
+        const resizedBounds = resizedPage?.getBoundingClientRect()
+        if (!resizedBounds) return
+        container.scrollLeft += resizedBounds.left + resizedBounds.width * relativeX - clientX
+        container.scrollTop += resizedBounds.top + resizedBounds.height * relativeY - clientY
+        setCurrentPage(lockedPage)
+      })
     })
   }
 
@@ -1015,6 +1089,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
     const taskKey = `${workspaceId}:${conversationId}`
     if (aiTasks.has(taskKey)) return
+    chatFollowSuspendedRef.current = false
     chatAutoFollowRef.current = true
     const targetIsDocument = scope === 'document'
     const selectionImages = targetIsDocument ? [] : selections.flatMap((item) => item.images).slice(0, 4)
@@ -1236,7 +1311,19 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button></div>
       <div className="action-grid"><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
     </section>
-    <div className="panel-scroll" ref={panelScrollRef}><section className="conversation">{history.map((message) => message.role === 'user' ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div> : <article className="answer-card" key={message.id}><div className="answer-actions"><button onClick={() => navigator.clipboard.writeText(message.content)} title={t('copy')}><Copy size={14} /></button><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform} components={{ a: ({ href, children }) => href?.startsWith('#raid-citation-page-') ? <span className="citation-page-label">{children}</span> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content, message.citationsDisabled, message.references, documentText)}</ReactMarkdown></div></article>)}{currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}<div ref={resultsEndRef} /></section>{error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}</div>
+    <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode)} onScroll={(event) => trackChatPosition(event.currentTarget)}>
+      <section className="conversation">
+        {history.map((message) => message.role === 'user'
+          ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div>
+          : <article className="answer-card" key={message.id}>
+              <div className="answer-actions"><CopyMessageButton content={message.content} copyLabel={t('copy')} /><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div>
+              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform} components={{ a: ({ href, children }) => href?.startsWith('#raid-citation-page-') ? <span className="citation-page-label">{children}</span> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content, message.citationsDisabled, message.references, documentText)}</ReactMarkdown></div>
+            </article>)}
+        {currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}
+        <div ref={resultsEndRef} />
+      </section>
+      {error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}
+    </div>
     <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
@@ -1285,11 +1372,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
               </div>
               {source.kind === 'pdf' && <div className="page-control">
                 <button disabled={currentPage <= 1} onClick={() => turnPage(-1)} title={t('previousPage')}><ChevronLeft size={16} /></button>
-                <input aria-label="页码" type="number" min={1} max={pdf?.numPages || 1} value={currentPage} onChange={(e) => jumpToPage(Math.max(1, Math.min(pdf?.numPages || 1, Number(e.target.value))))} /><span>/ {pdf?.numPages || '…'}</span>
+                <input aria-label="页码" type="text" inputMode="numeric" value={pageInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ''))} onBlur={commitPageInput} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setPageInput(String(currentPage)); event.currentTarget.blur() } }} /><span>/ {pdf?.numPages || '…'}</span>
                 <button disabled={!pdf || currentPage >= pdf.numPages} onClick={() => turnPage(1)} title={t('nextPage')}><ChevronRight size={16} /></button>
               </div>}
               <div className="reader-tools">
-                <div className="zoom-control"><button onClick={() => setZoom((z) => Math.max(0.25, z - 0.1))}><Minus size={15} /></button><input aria-label="缩放倍率" type="number" min="25" max="500" value={Math.round(zoom * 100)} onChange={(e) => setZoom(Math.max(.25, Math.min(5, Number(e.target.value) / 100)))} /><span>%</span><button onClick={() => setZoom((z) => Math.min(5, z + 0.1))}><Plus size={15} /></button></div>
+                <div className="zoom-control"><button onClick={() => setZoom((z) => Math.max(0.25, z - 0.1))}><Minus size={15} /></button><input aria-label="缩放倍率" type="text" inputMode="numeric" value={zoomInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setZoomInput(event.target.value.replace(/\D/g, ''))} onBlur={commitZoomInput} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setZoomInput(String(Math.round(zoom * 100))); event.currentTarget.blur() } }} /><span>%</span><button onClick={() => setZoom((z) => Math.min(5, z + 0.1))}><Plus size={15} /></button></div>
               </div>
             </div>
             <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={setAnnotations} /></div>

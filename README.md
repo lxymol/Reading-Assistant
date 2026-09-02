@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-1.2.0-3794ff)
+![Version](https://img.shields.io/badge/version-1.3.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid is a lightweight, project-oriented AI reader for papers, textbooks, and technical documents. It combines continuous PDF/image reading, text and cross-page area selection, OCR, Markdown notes, persistent annotations, and user-configured models.
@@ -62,7 +62,7 @@ Download the Windows installer from [GitHub Releases](https://github.com/lxymol/
 
 Raid keeps projects, source files, conversations, notes, and annotations under `RaidData/Data` beside the executable, so large durable data does not accumulate in the Windows profile on drive C. Electron retains only small settings and up to 128 MB of startup cache in the standard Windows location; conversion scratch data and the migrated legacy IndexedDB are cleared on normal exit.
 
-Current version: `1.2.0`.
+Current version: `1.3.0`.
 
 ## AI configuration
 

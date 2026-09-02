@@ -54,7 +54,7 @@ class CodexAppServer {
     child.once('exit', (code) => this.failAll(new Error(this.stderr.trim() || `Codex App Server 已退出（${code ?? 'unknown'}）`)))
     this.reader = readline.createInterface({ input: child.stdout })
     this.reader.on('line', (line) => this.onLine(line))
-    await this.request('initialize', { clientInfo: { name: 'raid_reader', title: 'Raid', version: '1.2.0' } }, false)
+    await this.request('initialize', { clientInfo: { name: 'raid_reader', title: 'Raid', version: '1.3.0' } }, false)
     this.notify('initialized', {})
   }
 
@@ -163,8 +163,8 @@ class CodexAppServer {
       serviceName: 'raid_reader',
       ephemeral: true,
       developerInstructions: generalChat
-        ? 'You are embedded in Raid as a general conversational assistant. You have no direct tools. Never use the shell, local files, or the network. Raid may provide results from its own restricted tools inside the user message; use only those results and answer without assuming any other access.'
-        : 'You are embedded in Raid as a document-reading model. You have no direct tools. Never use the shell, local files, or the network. Raid may provide results from its own restricted tools inside the user message; use only the supplied material.',
+        ? 'You are embedded in Raid as a general conversational assistant. You have no direct tools. Never use the shell, local files, or the network. Raid may provide results from its own restricted tools inside the user message; use only those results and answer without assuming any other access. Final user-facing answers must be Markdown and must not be wrapped in one outer code fence.'
+        : 'You are embedded in Raid as a document-reading model. You have no direct tools. Never use the shell, local files, or the network. Raid may provide results from its own restricted tools inside the user message; use only the supplied material. Final user-facing answers must be Markdown and must not be wrapped in one outer code fence.',
     })
     if (signal?.aborted) throw abortError()
     const threadId = threadResult?.thread?.id
