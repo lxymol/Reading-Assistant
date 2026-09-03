@@ -31,7 +31,7 @@ const sessionDataPath = path.join(runtimeDataPath, 'Chromium')
 const crashDataPath = path.join(cacheDataPath, 'Crashpad')
 const conversionCachePath = path.join(cacheDataPath, 'Conversion')
 const dataManifestPath = path.join(raidDataPath, 'manifest.json')
-const storageSchemaVersion = 1
+const storageSchemaVersion = 2
 const defaultUserDataPath = app.getPath('userData')
 const defaultSessionDataPath = app.getPath('sessionData')
 const chromiumDiskCacheLimit = 64 * 1024 * 1024
@@ -243,83 +243,124 @@ function projectDataDirectory(id) {
   return directory
 }
 
+function projectFileDirectory(projectId, fileId) {
+  const root = path.join(projectDataDirectory(projectId), 'files')
+  const key = createHash('sha256').update(String(fileId)).digest('hex')
+  const directory = path.join(root, key)
+  if (!path.resolve(directory).startsWith(`${path.resolve(root)}${path.sep}`)) throw new Error('INVALID_FILE_ID')
+  return directory
+}
+
 function writeJsonAtomically(filePath, value) {
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
   fs.writeFileSync(temporaryPath, JSON.stringify(value))
   fs.renameSync(temporaryPath, filePath)
 }
 
-function readProjectRecord(directory, includeSource = true) {
-  const metadataPath = path.join(directory, 'project.json')
-  if (!fs.existsSync(metadataPath)) return null
-  const stored = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
-  if (Number(stored.schemaVersion || 0) > storageSchemaVersion) throw new Error('PROJECT_DATA_FROM_NEWER_VERSION')
-  const { schemaVersion: _schemaVersion, hasSource: _hasSource, ...record } = stored
-  const sourcePath = path.join(directory, 'source.bin')
-  return includeSource && fs.existsSync(sourcePath) ? { ...record, fileData: new Uint8Array(fs.readFileSync(sourcePath)) } : record
+function writeAssetMap(directory, assets = {}) {
+  fs.rmSync(directory, { recursive: true, force: true })
+  fs.mkdirSync(directory, { recursive: true })
+  const manifest = {}
+  for (const [id, value] of Object.entries(assets || {})) {
+    const match = String(value).match(/^data:([^;,]+);base64,(.+)$/s)
+    if (!match) continue
+    const fileName = `${createHash('sha256').update(id).digest('hex')}.bin`
+    fs.writeFileSync(path.join(directory, fileName), Buffer.from(match[2], 'base64'))
+    manifest[id] = { fileName, mime: match[1] }
+  }
+  return manifest
 }
 
-function listProjectRecords(includeSource = true) {
-  const records = []
-  for (const entry of fs.readdirSync(projectsDataPath, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    try {
-      const record = readProjectRecord(path.join(projectsDataPath, entry.name), includeSource)
-      if (record) records.push(record)
-    } catch (error) {
-      logStartup(`Skipped unreadable project ${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
-    }
+function readAssetMap(directory, manifest = {}) {
+  const assets = {}
+  for (const [id, item] of Object.entries(manifest || {})) {
+    const assetPath = path.join(directory, path.basename(String(item?.fileName || '')))
+    if (fs.existsSync(assetPath)) assets[id] = `data:${item?.mime || 'application/octet-stream'};base64,${fs.readFileSync(assetPath).toString('base64')}`
   }
-  return records.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+  return assets
 }
 
 function projectSummary(record) {
-  return { id: record.id, fileName: record.fileName, fileSize: record.fileSize, fileType: record.fileType, lastModified: record.lastModified, updatedAt: record.updatedAt, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : Number(record.conversationCount || 0) }
+  return { id: record.id, name: record.name, fileCount: Array.isArray(record.fileOrder) ? record.fileOrder.length : 0, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : 0, updatedAt: record.updatedAt, activeFileId: record.activeFileId || null }
+}
+
+function readProjectRecord(id) {
+  const directory = projectDataDirectory(id)
+  const metadataPath = path.join(directory, 'project.json')
+  if (!fs.existsSync(metadataPath)) return null
+  const stored = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+  if (stored.kind !== 'raid-project' || Number(stored.schemaVersion) !== storageSchemaVersion) return null
+  const { schemaVersion: _schemaVersion, kind: _kind, fileOrder = [], projectAssetManifest, ...project } = stored
+  const files = fileOrder.flatMap((fileId) => {
+    const fileDirectory = projectFileDirectory(id, fileId)
+    const filePath = path.join(fileDirectory, 'file.json')
+    if (!fs.existsSync(filePath)) return []
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    const indexPath = path.join(fileDirectory, 'index.json')
+    const index = fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : { paragraphs: [], indexState: value.indexState }
+    const { assetManifest: _assetManifest, fileNotes: _fileNotes, fileNoteAssets: _fileNoteAssets, ...file } = value
+    return [{ ...file, paragraphs: Array.isArray(index.paragraphs) ? index.paragraphs : [], indexState: index.indexState || file.indexState }]
+  })
+  return { ...project, files, projectNoteAssets: readAssetMap(path.join(directory, 'resources'), projectAssetManifest) }
 }
 
 function listProjectSummaries() {
   const summaries = []
   for (const entry of fs.readdirSync(projectsDataPath, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
-    const directory = path.join(projectsDataPath, entry.name)
     try {
-      const summaryPath = path.join(directory, 'summary.json')
-      const summary = fs.existsSync(summaryPath) ? JSON.parse(fs.readFileSync(summaryPath, 'utf8')) : projectSummary(readProjectRecord(directory, false) || {})
-      if (!fs.existsSync(summaryPath) && summary.id) writeJsonAtomically(summaryPath, summary)
-      if (summary.id) summaries.push(summary)
-    } catch (error) {
-      logStartup(`Skipped unreadable project summary ${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
-    }
+      const summaryPath = path.join(projectsDataPath, entry.name, 'summary.json')
+      if (!fs.existsSync(summaryPath)) continue
+      const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
+      if (summary.schemaVersion === storageSchemaVersion) summaries.push(summary)
+    } catch (error) { logStartup(`Skipped unreadable project summary ${entry.name}: ${error instanceof Error ? error.message : String(error)}`) }
   }
   return summaries.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
 }
 
 function saveProjectRecord(payload) {
-  if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string') throw new Error('INVALID_PROJECT_RECORD')
+  if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string' || !Array.isArray(payload.files)) throw new Error('INVALID_PROJECT_RECORD')
   const directory = projectDataDirectory(payload.id)
-  fs.mkdirSync(directory, { recursive: true })
-  const { fileData, ...record } = payload
-  const sourcePath = path.join(directory, 'source.bin')
-  if (fileData != null) {
-    const temporarySource = `${sourcePath}.${process.pid}.${randomUUID()}.tmp`
-    fs.writeFileSync(temporarySource, Buffer.from(fileData))
-    fs.renameSync(temporarySource, sourcePath)
+  fs.mkdirSync(path.join(directory, 'files'), { recursive: true })
+  const { files, projectNoteAssets, ...project } = payload
+  const projectAssetManifest = writeAssetMap(path.join(directory, 'resources'), projectNoteAssets)
+  for (const value of files) {
+    if (!value || value.projectId !== payload.id || typeof value.id !== 'string') throw new Error('INVALID_PROJECT_FILE')
+    const fileDirectory = projectFileDirectory(payload.id, value.id)
+    fs.mkdirSync(fileDirectory, { recursive: true })
+    const { paragraphs, fileNotes: _fileNotes, fileNoteAssets: _fileNoteAssets, assetManifest: _assetManifest, ...file } = value
+    writeJsonAtomically(path.join(fileDirectory, 'file.json'), file)
+    writeJsonAtomically(path.join(fileDirectory, 'index.json'), { indexState: file.indexState, paragraphs })
   }
-  writeJsonAtomically(path.join(directory, 'project.json'), { schemaVersion: storageSchemaVersion, hasSource: fs.existsSync(sourcePath), ...record })
-  writeJsonAtomically(path.join(directory, 'summary.json'), projectSummary(record))
+  const record = { schemaVersion: storageSchemaVersion, kind: 'raid-project', ...project, fileOrder: files.map((file) => file.id), projectAssetManifest }
+  writeJsonAtomically(path.join(directory, 'project.json'), record)
+  writeJsonAtomically(path.join(directory, 'summary.json'), { schemaVersion: storageSchemaVersion, ...projectSummary(record) })
   writeDataManifest()
   return true
 }
 
-function deleteProjectRecord(id) {
-  fs.rmSync(projectDataDirectory(id), { recursive: true, force: true })
-  writeDataManifest()
+function getProjectFileSource(projectId, fileId) {
+  const sourcePath = path.join(projectFileDirectory(projectId, fileId), 'source.bin')
+  return fs.existsSync(sourcePath) ? new Uint8Array(fs.readFileSync(sourcePath)) : null
 }
+
+function saveProjectFileSource(payload) {
+  if (!payload || typeof payload.projectId !== 'string' || typeof payload.fileId !== 'string' || payload.data == null) throw new Error('INVALID_PROJECT_FILE_SOURCE')
+  const directory = projectFileDirectory(payload.projectId, payload.fileId)
+  fs.mkdirSync(directory, { recursive: true })
+  const sourcePath = path.join(directory, 'source.bin')
+  const temporaryPath = `${sourcePath}.${process.pid}.${randomUUID()}.tmp`
+  fs.writeFileSync(temporaryPath, Buffer.from(payload.data)); fs.renameSync(temporaryPath, sourcePath)
+  return true
+}
+
+function deleteProjectRecord(id) { fs.rmSync(projectDataDirectory(id), { recursive: true, force: true }); writeDataManifest() }
+function deleteProjectFile(projectId, fileId) { fs.rmSync(projectFileDirectory(projectId, fileId), { recursive: true, force: true }); writeDataManifest() }
 
 writeDataManifest()
 
 async function maintainCachesOnExit() {
-  if (readDataManifest().systemProfileProjectMigrationComplete) await session.defaultSession.clearData({ dataTypes: ['indexedDB'] }).catch(() => undefined)
+  await session.defaultSession.clearData({ dataTypes: ['indexedDB'] }).catch(() => undefined)
   // Performance caches are deliberately retained: Chromium enforces the size
   // limits above, while keeping them warm avoids a cold start after every exit.
   fs.rmSync(conversionCachePath, { recursive: true, force: true })
@@ -329,13 +370,13 @@ async function maintainCachesOnExit() {
 ipcMain.handle('reading-assistant:select-skill-folder', () => selectImportFolder('skill'))
 ipcMain.handle('reading-assistant:select-language-folder', () => selectImportFolder('language'))
 ipcMain.handle('reading-assistant:convert-document', (_event, payload) => convertDocument(payload))
-ipcMain.handle('reading-assistant:list-project-memories', () => listProjectRecords(false))
-ipcMain.handle('reading-assistant:get-project-memory', (_event, id) => readProjectRecord(projectDataDirectory(id), true))
-ipcMain.handle('reading-assistant:save-project-memory', (_event, payload) => saveProjectRecord(payload))
-ipcMain.handle('reading-assistant:delete-project-memory', (_event, id) => deleteProjectRecord(id))
-ipcMain.handle('reading-assistant:list-project-memory-summaries', () => listProjectSummaries())
-ipcMain.handle('reading-assistant:get-project-migration-status', () => Boolean(readDataManifest().systemProfileProjectMigrationComplete))
-ipcMain.handle('reading-assistant:complete-project-migration', () => { writeDataManifest({ legacyProjectMigrationComplete: true, systemProfileProjectMigrationComplete: true }); return true })
+ipcMain.handle('reading-assistant:list-projects', () => listProjectSummaries())
+ipcMain.handle('reading-assistant:get-project', (_event, id) => readProjectRecord(id))
+ipcMain.handle('reading-assistant:save-project', (_event, payload) => saveProjectRecord(payload))
+ipcMain.handle('reading-assistant:get-project-file-source', (_event, projectId, fileId) => getProjectFileSource(projectId, fileId))
+ipcMain.handle('reading-assistant:save-project-file-source', (_event, payload) => saveProjectFileSource(payload))
+ipcMain.handle('reading-assistant:delete-project', (_event, id) => deleteProjectRecord(id))
+ipcMain.handle('reading-assistant:delete-project-file', (_event, projectId, fileId) => deleteProjectFile(projectId, fileId))
 ipcMain.handle('reading-assistant:open-external', async (_event, value) => {
   const url = new URL(String(value || ''))
   if (url.protocol !== 'https:') throw new Error('Only HTTPS links may be opened externally.')

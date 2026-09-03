@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type ClipboardEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { Download, PenLine, RotateCcw } from 'lucide-react'
+import { Download, Minus, PenLine, Plus, RotateCcw } from 'lucide-react'
 
 type Props = { fileName: string; value: string; onChange: (value: string) => void; assets: Record<string, string>; onAssetsChange: (assets: Record<string, string>) => void }
 
@@ -38,11 +38,16 @@ const cropInk = (canvas: HTMLCanvasElement, dark: boolean) => {
 
 export default function NoteEditor({ fileName, value, onChange, assets, onAssetsChange }: Props) {
   const [inking, setInking] = useState(false)
+  const [fontSize, setFontSize] = useState(() => {
+    const saved = Number(localStorage.getItem('reading-assistant-note-font-size'))
+    return Number.isFinite(saved) && saved >= 8 && saved <= 24 ? saved : 12
+  })
   const [splitRatio, setSplitRatio] = useState(() => {
     const saved = Number(localStorage.getItem('reading-assistant-note-split'))
     return Number.isFinite(saved) && saved >= .15 && saved <= .85 ? saved : .42
   })
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const editorRef = useRef<HTMLElement>(null)
   const noteLiveRef = useRef<HTMLDivElement>(null)
   const sourceRef = useRef<HTMLTextAreaElement>(null)
   const previewRef = useRef<HTMLDivElement>(null)
@@ -50,6 +55,26 @@ export default function NoteEditor({ fileName, value, onChange, assets, onAssets
   const splitDragRef = useRef<{ sourceAtBottom: boolean; previewAtBottom: boolean } | null>(null)
   const drawing = useRef(false)
   const dark = document.documentElement.dataset.theme === 'dark'
+
+  const changeFontSize = useCallback((step: number) => {
+    setFontSize((current) => {
+      const next = Math.max(8, Math.min(24, current + step))
+      localStorage.setItem('reading-assistant-note-font-size', String(next))
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    const zoomNote = (event: WheelEvent) => {
+      if (!event.ctrlKey) return
+      event.preventDefault()
+      changeFontSize(event.deltaY < 0 ? 1 : -1)
+    }
+    editor.addEventListener('wheel', zoomNote, { passive: false })
+    return () => editor.removeEventListener('wheel', zoomNote)
+  }, [changeFontSize])
 
   const prepareCanvas = useCallback((canvas: HTMLCanvasElement) => {
     const context = canvas.getContext('2d')
@@ -157,8 +182,8 @@ export default function NoteEditor({ fileName, value, onChange, assets, onAssets
     URL.revokeObjectURL(url)
   }
 
-  return <section className="note-editor">
-    <header><span /> <div>
+  return <section className="note-editor" ref={editorRef} style={{ '--note-font-size': `${fontSize}px` } as CSSProperties}>
+    <header><div className="note-zoom"><button disabled={fontSize <= 8} onClick={() => changeFontSize(-1)} title="缩小笔记字号"><Minus size={13} /></button><span>{Math.round(fontSize / 12 * 100)}%</span><button disabled={fontSize >= 24} onClick={() => changeFontSize(1)} title="放大笔记字号"><Plus size={13} /></button></div><div>
       <button onClick={() => setInking(true)}><PenLine size={14} />墨迹</button>
       <button onClick={download}><Download size={14} />导出</button>
     </div></header>

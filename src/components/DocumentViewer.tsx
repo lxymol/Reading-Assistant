@@ -8,7 +8,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import SelectableCanvas from './SelectableCanvas'
 import AnnotationLayer from './AnnotationLayer'
-import type { AnnotationTool, DocumentAnnotation, DocumentHighlight, SelectionResult, SourceFile, TextAnnotation } from '../types'
+import type { AnnotationTool, DocumentAnnotation, DocumentHighlight, DocumentTag, NormalizedRegion, SelectionResult, SourceFile, TextAnnotation } from '../types'
 import { loadPdf, type DocumentReference } from '../lib/pdf'
 import { useI18n } from '../i18n'
 
@@ -18,6 +18,10 @@ type Props = {
   currentPage: number
   inverted: boolean
   areaSelectionEnabled: boolean
+  tagMode: boolean
+  tags: DocumentTag[]
+  onCreateTag: (page: number, region: NormalizedRegion) => void
+  onMoveTag: (id: string, region: NormalizedRegion) => void
   onPdfReady: (pdf: PDFDocumentProxy) => void
   onSelect: (selection: SelectionResult) => void
   onTextAi: (text: string) => void
@@ -34,7 +38,60 @@ type Props = {
 
 type AnnotationPageProps = Pick<Props, 'annotationMode' | 'annotationTool' | 'annotationColor' | 'annotations' | 'onAnnotationsChange'>
 
-function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highlights, citationFocus, ...annotationProps }: { pdf: PDFDocumentProxy; pageNumber: number; zoom: number; inverted: boolean; textSelectionEnabled: boolean; highlights: DocumentHighlight[]; citationFocus: DocumentReference | null } & AnnotationPageProps) {
+function TagPlacementLayer({ active }: { active: boolean }) {
+  if (!active) return null
+  return <div className="tag-placement-layer" title="点击添加标签" aria-hidden="true" />
+}
+
+function TagMarkerLayer({ tags, active, onMove }: { tags: DocumentTag[]; active: boolean; onMove: Props['onMoveTag'] }) {
+  const dragRef = useRef<{ id: string; pointerId: number; offsetX: number; offsetY: number; width: number; height: number; region: NormalizedRegion } | null>(null)
+  return <div className="document-tag-layer">{tags.map((tag) => <i
+    key={tag.id}
+    className="document-tag-marker"
+    title={tag.label || `第 ${tag.page} 页标签`}
+    style={{ left: `${(tag.region.left + tag.region.width / 2) * 100}%`, top: `${(tag.region.top + tag.region.height / 2) * 100}%` }}
+    onPointerDown={(event) => {
+      if (!active || event.button !== 0) return
+      const page = event.currentTarget.closest<HTMLElement>('.selectable-page')
+      const bounds = page?.getBoundingClientRect()
+      if (!bounds?.width || !bounds.height) return
+      event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId)
+      dragRef.current = {
+        id: tag.id, pointerId: event.pointerId,
+        offsetX: (event.clientX - bounds.left) / bounds.width - tag.region.left - tag.region.width / 2,
+        offsetY: (event.clientY - bounds.top) / bounds.height - tag.region.top - tag.region.height / 2,
+        width: tag.region.width, height: tag.region.height, region: tag.region,
+      }
+    }}
+    onPointerMove={(event) => {
+      const drag = dragRef.current
+      if (!drag || drag.pointerId !== event.pointerId || drag.id !== tag.id) return
+      const page = event.currentTarget.closest<HTMLElement>('.selectable-page')
+      const bounds = page?.getBoundingClientRect()
+      if (!bounds?.width || !bounds.height) return
+      event.preventDefault(); event.stopPropagation()
+      const centerX = (event.clientX - bounds.left) / bounds.width - drag.offsetX
+      const centerY = (event.clientY - bounds.top) / bounds.height - drag.offsetY
+      drag.region = {
+        left: Math.max(0, Math.min(1 - drag.width, centerX - drag.width / 2)),
+        top: Math.max(0, Math.min(1 - drag.height, centerY - drag.height / 2)),
+        width: drag.width, height: drag.height,
+      }
+      event.currentTarget.style.left = `${(drag.region.left + drag.region.width / 2) * 100}%`
+      event.currentTarget.style.top = `${(drag.region.top + drag.region.height / 2) * 100}%`
+    }}
+    onPointerUp={(event) => {
+      if (dragRef.current?.pointerId !== event.pointerId) return
+      const drag = dragRef.current
+      event.preventDefault(); event.stopPropagation(); dragRef.current = null
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      onMove(tag.id, drag.region)
+    }}
+    onPointerCancel={(event) => { event.stopPropagation(); dragRef.current = null }}
+  >{tag.label && <span>{tag.label}</span>}</i>)}</div>
+}
+
+function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highlights, citationFocus, tagMode, tags, onMoveTag, ...annotationProps }: { pdf: PDFDocumentProxy; pageNumber: number; zoom: number; inverted: boolean; textSelectionEnabled: boolean; highlights: DocumentHighlight[]; citationFocus: DocumentReference | null; tagMode: boolean; tags: DocumentTag[]; onMoveTag: Props['onMoveTag'] } & AnnotationPageProps) {
   const textLayerRef = useRef<HTMLDivElement>(null)
   const citationLayerRef = useRef<HTMLDivElement>(null)
   const render = useCallback(async (canvas: HTMLCanvasElement) => {
@@ -98,10 +155,10 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     reveal()
     return () => { active = false }
   }, [focusedRegion])
-  return <SelectableCanvas pageNumber={pageNumber} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div ref={citationLayerRef} className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /></>} />
+  return <SelectableCanvas pageNumber={pageNumber} initialSize={{ width: 500 * zoom, height: 710 * zoom }} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div ref={citationLayerRef} className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<TagMarkerLayer tags={tags.filter((tag) => tag.page === pageNumber)} active={tagMode} onMove={onMoveTag} /><div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /><TagPlacementLayer active={tagMode} /></>} />
 }
 
-function ImagePage({ source, zoom, inverted, ...annotationProps }: { source: SourceFile; zoom: number; inverted: boolean } & AnnotationPageProps) {
+function ImagePage({ source, zoom, inverted, tagMode, tags, onMoveTag, ...annotationProps }: { source: SourceFile; zoom: number; inverted: boolean; tagMode: boolean; tags: DocumentTag[]; onMoveTag: Props['onMoveTag'] } & AnnotationPageProps) {
   const render = useCallback(async (canvas: HTMLCanvasElement) => {
     const image = new Image()
     image.src = source.url
@@ -111,7 +168,30 @@ function ImagePage({ source, zoom, inverted, ...annotationProps }: { source: Sou
     canvas.style.width = `${Math.min(1100, image.naturalWidth) * zoom}px`
     contextSafe(canvas)?.drawImage(image, 0, 0)
   }, [source.url, zoom])
-  return <SelectableCanvas pageNumber={1} className="image-page" render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<AnnotationLayer pageNumber={1} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} />} />
+  return <SelectableCanvas pageNumber={1} className="image-page" render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><TagMarkerLayer tags={tags} active={tagMode} onMove={onMoveTag} /><AnnotationLayer pageNumber={1} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /><TagPlacementLayer active={tagMode} /></>} />
+}
+
+type PdfPageProps = Parameters<typeof PdfPage>[0]
+
+function LazyPdfPage(props: PdfPageProps) {
+  const { pageNumber } = props
+  const placeholderRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(() => pageNumber <= 3)
+
+  useEffect(() => {
+    if (visible) return
+    const placeholder = placeholderRef.current
+    if (!placeholder) return
+    const root = placeholder.closest<HTMLElement>('.reader-scroll')
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setVisible(true)
+    }, { root, rootMargin: '900px 0px' })
+    observer.observe(placeholder)
+    return () => observer.disconnect()
+  }, [visible])
+
+  if (visible) return <PdfPage {...props} />
+  return <div ref={placeholderRef} className="pdf-page-placeholder" data-page-number={pageNumber} style={{ width: 500 * props.zoom, height: 710 * props.zoom }}><span>{pageNumber}</span></div>
 }
 
 const contextSafe = (canvas: HTMLCanvasElement) => canvas.getContext('2d')
@@ -144,7 +224,7 @@ function drawAnnotationsIntoCrop(context: CanvasRenderingContext2D, pageAnnotati
   context.restore()
 }
 
-export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotations, onAnnotationsChange }: Props) {
+export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, tagMode, tags, onCreateTag, onMoveTag, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotations, onAnnotationsChange }: Props) {
   const { t, pack } = useI18n()
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [error, setError] = useState('')
@@ -160,8 +240,6 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
   const [copied, setCopied] = useState(false)
   const dragRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null)
   const translationControllerRef = useRef<AbortController | null>(null)
-  const renderRadius = zoom > 1.8 ? 1 : zoom > 1.2 ? 2 : 3
-
   useEffect(() => {
     if (source.kind !== 'pdf') return
     loadPdf(source.url)
@@ -179,7 +257,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       window.getSelection()?.removeAllRanges()
     })
     return () => cancelAnimationFrame(frame)
-  }, [areaSelectionEnabled, annotationMode])
+  }, [areaSelectionEnabled, annotationMode, tagMode])
 
   useEffect(() => () => translationControllerRef.current?.abort(), [])
 
@@ -243,7 +321,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       translationControllerRef.current?.abort(); translationControllerRef.current = null
       setTextAction(null); setTranslation(''); setTranslating(false); window.getSelection()?.removeAllRanges()
     }
-    if (annotationMode || !areaSelectionEnabled || event.button !== 0 || !(event.target as HTMLElement).closest('.selectable-page')) return
+    if (annotationMode || tagMode || !areaSelectionEnabled || event.button !== 0 || !(event.target as HTMLElement).closest('.selectable-page')) return
     event.currentTarget.setPointerCapture(event.pointerId)
     const point = pointFromClient(event.clientX, event.clientY)
     startRef.current = point
@@ -251,6 +329,22 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     const next = { left: point.x, top: point.y, width: 0, height: 0 }
     rectRef.current = next
     setSelectionRect(next)
+  }
+
+  const placeTag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!tagMode || event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('.document-tag-marker')) return
+    const pageElement = target.closest<HTMLElement>('.selectable-page')
+    if (!pageElement || !event.currentTarget.contains(pageElement)) return
+    const bounds = pageElement.getBoundingClientRect()
+    if (!bounds.width || !bounds.height) return
+    event.preventDefault()
+    event.stopPropagation()
+    const size = .024
+    const left = Math.max(0, Math.min(1 - size, (event.clientX - bounds.left) / bounds.width - size / 2))
+    const top = Math.max(0, Math.min(1 - size, (event.clientY - bounds.top) / bounds.height - size / 2))
+    onCreateTag(Number(pageElement.dataset.pageNumber) || 1, { left, top, width: size, height: size })
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -362,7 +456,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest('.text-action-popover')) return
-    if (annotationMode) return
+    if (annotationMode || tagMode) return
     if (areaSelectionEnabled) finishSelection()
     else showTextActions()
   }
@@ -399,7 +493,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     window.getSelection()?.removeAllRanges()
   }
 
-  const textActionPopover = !areaSelectionEnabled && !annotationMode && textAction ? <div
+  const textActionPopover = !areaSelectionEnabled && !annotationMode && !tagMode && textAction ? <div
     className="text-action-popover"
     style={{ left: textAction.left, top: textAction.top }}
     onPointerDown={(event) => {
@@ -435,14 +529,12 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
   </div> : null
 
   return (
-    <div className={`document-stack ${annotationMode ? 'annotation-mode' : areaSelectionEnabled ? 'continuous-selection' : 'text-selection-mode'}`} ref={stackRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => areaSelectionEnabled && !annotationMode && finishSelection()}>
+    <div className={`document-stack ${tagMode ? 'tag-mode' : annotationMode ? 'annotation-mode' : areaSelectionEnabled ? 'continuous-selection' : 'text-selection-mode'}`} ref={stackRef} onPointerDownCapture={placeTag} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => areaSelectionEnabled && !annotationMode && !tagMode && finishSelection()}>
       {source.kind === 'image'
-        ? <ImagePage source={source} zoom={zoom} inverted={inverted} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
+        ? <ImagePage source={source} zoom={zoom} inverted={inverted} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         : pdf && Array.from({ length: pdf.numPages }, (_, index) => {
           const pageNumber = index + 1
-          return Math.abs(pageNumber - currentPage) <= renderRadius
-            ? <PdfPage key={pageNumber} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode} highlights={highlights} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
-            : <div key={pageNumber} className="pdf-page-placeholder" data-page-number={pageNumber} style={{ width: 500 * zoom, height: 710 * zoom }}><span>{pageNumber}</span></div>
+          return <LazyPdfPage key={pageNumber} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         })}
       {selectionRect && <div className="document-selection-rect" style={selectionRect} />}
       {textActionPopover && createPortal(textActionPopover, document.body)}

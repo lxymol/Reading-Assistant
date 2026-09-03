@@ -4,6 +4,31 @@ All notable changes to Raid are documented here.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-03
+
+### Added
+
+- Added lightweight multi-project workspaces with multiple files per project, project-scoped conversations and notes, lazy source loading, and file-based durable storage.
+- Added persistent, draggable document tags with editable page labels, a dedicated tag panel, cross-file navigation history, and theme-aware markers.
+- Added separate AI scopes for selection, current document, and the whole project, with structured inline citations that jump back to their exact source regions.
+- Added synchronized project-note font scaling through toolbar controls and Ctrl+mouse-wheel input.
+- Added regression tests for retrieval coverage, cross-file diversity, structured citations, navigation, tags, and multi-column PDF indexing.
+
+### Changed
+
+- Reworked document retrieval to combine query relevance with distributed whole-document coverage, while project retrieval preserves evidence diversity across files.
+- Moved tag-mode controls and navigation history into the tag panel and made opening or closing the panel independent from tag placement mode.
+- Kept only project notes and removed legacy per-file notes from the application model and interface.
+- Replaced the Electron-incompatible native new-project prompt with an inline project-name editor.
+- Reduced OCR startup work and kept PDF page rendering lazy so multi-page documents remain responsive.
+
+### Fixed
+
+- Fixed PDFs and imported files displaying only their first page.
+- Fixed tag placement, drag persistence, renamed labels, panel state, recent-tag acknowledgement, theme colors, and unwanted focus flashes after tag navigation.
+- Fixed document and project AI requests sending too little indexed context, and preserved the user's actual question in later conversation turns.
+- Fixed AI citation lifecycle and styling so conversation citations remain temporary and disappear with their messages.
+
 ## [1.3.0] - 2026-09-02
 
 ### Changed

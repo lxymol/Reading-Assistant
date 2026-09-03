@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react'
+import { Fragment, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import type { Worker as OcrWorker } from 'tesseract.js'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
@@ -9,52 +9,43 @@ import 'katex/dist/katex.min.css'
 import {
   BrainCircuit, Check, ChevronLeft, ChevronRight, Copy, FileText, Languages, FolderOpen,
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
-  Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, StickyNote, Square,
+  Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, StickyNote, Square, Tag,
 } from 'lucide-react'
 import ActivityBar from './components/ActivityBar'
-import DocumentViewer from './components/DocumentViewer'
-import AiSettingsModal from './components/AiSettingsModal'
 import NoteEditor from './components/NoteEditor'
 import ProjectExplorer from './components/ProjectExplorer'
+import TagPanel from './components/TagPanel'
 import WorkspacePanel from './components/WorkspacePanel'
-import { extractPdfRegionText, extractPdfText, findDocumentReference, type DocumentReference } from './lib/pdf'
-import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, ChatReference, Conversation, DocumentAnnotation, DocumentHighlight, ImportedSkill, MemorySettings, PanelId, PanelLayout, SelectionResult, SourceFile, TextAnnotation, WorkArea } from './types'
+import type { DocumentReference } from './lib/pdf'
+import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, ChatReference, Conversation, DocumentAnnotation, DocumentHighlight, DocumentTag, ImportedSkill, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ProjectSummary, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
-import { deleteFileMemory, getFileMemory, getFileMemoryId, listFileMemories, migrateLegacyFileMemories, saveFileMemory, type FileMemoryRecord, type FileMemorySummary } from './lib/memory'
 import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadSkills, loadUserMemory } from './lib/preferences'
+import { projectRepository } from './services/projectRepository'
+import { stableTextHash } from './services/layoutAnalyzer'
+import { retrievalService } from './services/retrievalService'
+import { createCitationContext, createReferences, validateReference } from './services/citationService'
+import { inlineCitationsToMarkdown, referenceNumberFromHref } from './services/inlineCitation'
+import { NavigationService } from './services/navigationService'
+import { ReaderController } from './services/readerController'
+import { createTag, tagsWithoutFile } from './services/tagStore'
+
+const DocumentViewer = lazy(() => import('./components/DocumentViewer'))
+const AiSettingsModal = lazy(() => import('./components/AiSettingsModal'))
+const documentIndexVersion = 1
 
 
 const makeId = () => crypto.randomUUID()
-const getCurrentTimestamp = () => Date.now()
 const nextPanelZ = (items: Record<PanelId, PanelLayout>) => Math.max(40, ...Object.values(items).map((item) => item.z)) + 1
 const normalizePanelZ = (items: Record<PanelId, PanelLayout>) => Object.fromEntries(
   (Object.entries(items) as [PanelId, PanelLayout][])
     .sort(([, first], [, second]) => first.z - second.z)
     .map(([id, layout], index) => [id, { ...layout, z: 41 + index }]),
 ) as Record<PanelId, PanelLayout>
-const citationTagPattern = /\\?\[\\?\[\s*(?:REF\s*:\s*\d+(?:\s*\|\s*PAGE\s*:\s*\d+)?(?:\s*\|\s*RECT\s*:[^\]\r\n]+)?|PAGE\s*:\s*\d+|SOURCE\s*:\s*\d+\s*\|[^\]\r\n]*)\s*\\?\]\\?\]/gi
-const limitDisplayedCitationTags = (content: string) => {
-  const matches = [...content.matchAll(citationTagPattern)]
-  const plainLength = content.replace(citationTagPattern, '').trim().length
-  const limit = Math.min(50, Math.max(1, Math.ceil(plainLength / 320)))
-  if (matches.length <= limit) return content
-  const kept = new Set(Array.from({ length: limit }, (_, index) => Math.round(index * (matches.length - 1) / Math.max(1, limit - 1))))
-  let matchIndex = 0
-  return content.replace(citationTagPattern, (tag) => kept.has(matchIndex++) ? tag : '')
-}
-const normalizeAssistantMarkdown = (content: string, citationsDisabled = false, references?: ChatReference[], indexedDocument = '') => (citationsDisabled ? content.replace(citationTagPattern, '') : limitDisplayedCitationTags(content))
+const normalizeAssistantMarkdown = (content: string, references?: ChatReference[]) => inlineCitationsToMarkdown(content, references)
   .replace(/```(?:latex|tex)\s*([\s\S]*?)```/gi, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
   .replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
   .replace(/\\\((.*?)\\\)/g, (_match, formula: string) => `$${formula.trim()}$`)
-  .replace(/\\?\[\\?\[\s*SOURCE\s*:\s*(\d+)\s*\|[^\]\r\n]*\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
-  .replace(/\\?\[\\?\[\s*REF\s*:\s*\d+\s*\|\s*PAGE\s*:\s*(\d+)(?:\s*\|\s*RECT\s*:[^\]\r\n]+)?\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
-  .replace(/\\?\[\\?\[\s*REF\s*:\s*(\d+)\s*\\?\]\\?\]/gi, (_match, reference: string) => {
-    const id = Number(reference)
-    const page = references?.find((item) => item.id === id)?.page || findDocumentReference(indexedDocument, id)?.page
-    return page ? `[${page}](#raid-citation-page-${page})` : ''
-  })
-  .replace(/\\?\[\\?\[\s*PAGE\s*:\s*(\d+)\s*\\?\]\\?\]/gi, (_match, page: string) => `[${page}](#raid-citation-page-${page})`)
 
 function CopyMessageButton({ content, copyLabel }: { content: string; copyLabel: string }) {
   const [copied, setCopied] = useState(false)
@@ -110,13 +101,16 @@ const recentSelectionHistory = (messages: ChatMessage[]) => {
   return messages.map((message) => {
     if (message.role === 'user') {
       inferredMode = message.contextMode
-        || (/选区|selected/i.test(message.label || '') ? 'selection' : /全文|document/i.test(message.label || '') ? 'document' : undefined)
+        || (/选区|selected/i.test(message.label || '') ? 'selection' : /项目|project/i.test(message.label || '') ? 'project' : /全文|document/i.test(message.label || '') ? 'document' : undefined)
     }
     const contextMode = message.contextMode || (message.citationsDisabled ? 'selection' : inferredMode)
     return { message, contextMode }
   }).filter(({ message, contextMode }) => contextMode === 'selection' && message.content.length <= 12000)
     .slice(-4)
-    .map(({ message }) => ({ role: message.role, content: message.content.slice(0, 4000) }))
+    .map(({ message }) => ({
+      role: message.role,
+      content: (message.role === 'user' && message.prompt ? `${message.prompt}\n【当时选区】\n${message.content}` : message.content).slice(0, 4000),
+    }))
 }
 
 type HighlightRegion = NonNullable<DocumentHighlight['regions']>[number]
@@ -134,11 +128,12 @@ const highlightRegionOverlap = (a: HighlightRegion, b: HighlightRegion) => {
 
 export default function App({ onLanguageChange }: { onLanguageChange: (language: AppLanguage) => void }) {
   const { t, pack } = useI18n()
-  const [workAreas, setWorkAreas] = useState<WorkArea[]>([])
-  const [activeWorkAreaId, setActiveWorkAreaId] = useState<string | null>(null)
+  const [projects, setProjects] = useState<RuntimeProject[]>([])
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [activeFileId, setActiveFileId] = useState<string | null>(null)
   const [source, setSource] = useState<SourceFile | null>(null)
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
-  const [documentText, setDocumentText] = useState('')
+  const [, setDocumentText] = useState('')
   const [selectedText, setSelectedText] = useState('')
   const [selections, setSelections] = useState<CapturedSelection[]>([])
   const [initialConversationId] = useState<string>(() => makeId())
@@ -151,7 +146,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [pageInput, setPageInput] = useState('1')
   const [zoomInput, setZoomInput] = useState('100')
   const [areaSelectionEnabled, setAreaSelectionEnabled] = useState(false)
-  const [scope, setScope] = useState<'selection' | 'document'>('selection')
+  const [scope, setScope] = useState<'selection' | 'document' | 'project'>('selection')
   const [dark, setDark] = useState(loadDarkTheme)
   const [leftDockWidth, setLeftDockWidth] = useState(() => Number(localStorage.getItem('reading-assistant-left-width')) || 300)
   const [rightDockWidth, setRightDockWidth] = useState(() => Number(localStorage.getItem('reading-assistant-right-width')) || 390)
@@ -167,7 +162,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [error, setError] = useState('')
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [projectMemories, setProjectMemories] = useState<FileMemorySummary[]>([])
+  const [projectMemories, setProjectMemories] = useState<ProjectSummary[]>([])
   const [aiConfig, setAiConfig] = useState<AiConfig>(loadAiConfig)
   const [skills, setSkills] = useState<ImportedSkill[]>(loadSkills)
   const [memorySettings, setMemorySettings] = useState<MemorySettings>(loadMemorySettings)
@@ -181,9 +176,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [annotationMode, setAnnotationMode] = useState(false)
   const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('ink')
   const [annotationColor, setAnnotationColor] = useState('#2f6fed')
+  const [tagMode, setTagMode] = useState(false)
+  const [recentTagId, setRecentTagId] = useState<string | null>(null)
+  const [navigationDepth, setNavigationDepth] = useState(0)
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set())
   const [panelLayouts, setPanelLayouts] = useState(() => normalizePanelZ(loadPanelLayouts()))
-  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'selection', 'notes', 'chat'])
+  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'selection', 'notes', 'tags', 'chat'])
   const abortControllersRef = useRef(new Map<string, AbortController>())
   const hasVisualSelection = aiConfig.visionEnabled && selections.some((item) => item.images.length > 0)
   const selectionReady = Boolean(selectedText || hasVisualSelection)
@@ -200,7 +198,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const chatLastScrollTopRef = useRef(0)
   const readerScrollRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
-  const citationNavigationRef = useRef<{ page: number; until: number } | null>(null)
   const zoomPageLockRef = useRef<{ page: number; until: number } | null>(null)
   const resizeRef = useRef<
     | { kind: 'panel'; panel: 'left' | 'right'; startX: number; startWidth: number }
@@ -214,15 +211,17 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const selectionTextRef = useRef<HTMLTextAreaElement>(null)
   const selectionSplitRatioRef = useRef(selectionSplitRatio)
   const selectionSplitDragRef = useRef<{ imagesAtBottom: boolean; textAtBottom: boolean } | null>(null)
-  const activeWorkAreaIdRef = useRef<string | null>(null)
+  const activeProjectIdRef = useRef<string | null>(null)
+  const activeFileIdRef = useRef<string | null>(null)
   const activeConversationIdRef = useRef(activeConversationId)
   const selectionsRef = useRef<CapturedSelection[]>([])
   const pendingPageRestoreRef = useRef<number | null>(null)
   const userMemoryRef = useRef(userMemory)
   const memorySettingsRef = useRef(memorySettings)
   const memoryUpdateQueueRef = useRef<Promise<void>>(Promise.resolve())
-  const forgottenFileKeysRef = useRef(new Set<string>())
-  const currentAiTaskKey = activeWorkAreaId ? `${activeWorkAreaId}:${activeConversationId}` : ''
+  const navigationRef = useRef(new NavigationService())
+  const readerControllerRef = useRef(new ReaderController())
+  const currentAiTaskKey = activeProjectId ? `${activeProjectId}:${activeConversationId}` : ''
   const currentAiBusy = aiTasks.has(currentAiTaskKey)
   const slashSkillQuery = customPrompt.match(/^\/([^\s]*)$/)?.[1].toLocaleLowerCase()
   const skillSuggestions = slashSkillQuery === undefined ? [] : skills.filter((skill) => skill.command.toLocaleLowerCase().includes(slashSkillQuery) || skill.name.toLocaleLowerCase().includes(slashSkillQuery)).slice(0, 8)
@@ -332,7 +331,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     localStorage.setItem('reading-assistant-selection-split', String(selectionSplitRatioRef.current))
   }
 
-  useEffect(() => { activeWorkAreaIdRef.current = activeWorkAreaId }, [activeWorkAreaId])
+  useEffect(() => { activeProjectIdRef.current = activeProjectId }, [activeProjectId])
+  useEffect(() => { activeFileIdRef.current = activeFileId }, [activeFileId])
   useEffect(() => { activeConversationIdRef.current = activeConversationId }, [activeConversationId])
   useEffect(() => { selectionsRef.current = selections }, [selections])
   useEffect(() => { const timer = window.setTimeout(() => setPageInput(String(currentPage)), 0); return () => window.clearTimeout(timer) }, [currentPage])
@@ -362,74 +362,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const openSettings = () => {
     setSettingsOpen(true)
-    void listFileMemories().then(setProjectMemories).catch(() => setProjectMemories([]))
+    void projectRepository.list().then(setProjectMemories).catch(() => setProjectMemories([]))
   }
-
-  useEffect(() => {
-    if (!source) return
-    const memoryKey = getFileMemoryId(source.file)
-    if (forgottenFileKeysRef.current.has(memoryKey)) return
-    const timer = window.setTimeout(() => {
-      if (forgottenFileKeysRef.current.has(memoryKey)) return
-      const syncedConversations = conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item)
-      const record: FileMemoryRecord = {
-        id: memoryKey,
-        fileName: source.file.name,
-        fileSize: source.file.size,
-        fileType: source.file.type,
-        lastModified: source.file.lastModified,
-        updatedAt: getCurrentTimestamp(),
-        conversations: syncedConversations,
-        activeConversationId,
-        currentPage,
-        zoom,
-        areaSelectionEnabled,
-        scope,
-        fileBlob: source.file,
-        documentText,
-        documentTextVersion: 7,
-        note,
-        noteAssets,
-        highlights,
-        annotations,
-      }
-      void saveFileMemory(record).catch(() => undefined)
-    }, 700)
-    return () => window.clearTimeout(timer)
-  }, [source, conversations, activeConversationId, history, currentPage, zoom, areaSelectionEnabled, scope, documentText, note, noteAssets, highlights, annotations])
-
-  useEffect(() => {
-    const inactiveAreas = workAreas.filter((area) => area.id !== activeWorkAreaId && area.sourceLoaded !== false && !forgottenFileKeysRef.current.has(area.memoryKey))
-    if (!inactiveAreas.length) return
-    const timer = window.setTimeout(() => {
-      inactiveAreas.forEach((area) => {
-        if (forgottenFileKeysRef.current.has(area.memoryKey)) return
-        const record: FileMemoryRecord = {
-          id: area.memoryKey,
-          fileName: area.source.file.name,
-          fileSize: area.source.file.size,
-          fileType: area.source.file.type,
-          lastModified: area.source.file.lastModified,
-          updatedAt: getCurrentTimestamp(),
-          conversations: area.conversations,
-          activeConversationId: area.activeConversationId,
-          currentPage: area.currentPage,
-          zoom: area.zoom,
-          areaSelectionEnabled: area.areaSelectionEnabled,
-          scope: area.scope,
-          fileBlob: area.source.file,
-          documentText: area.documentText,
-          documentTextVersion: 7,
-          note: area.note,
-          noteAssets: area.noteAssets,
-          highlights: area.highlights,
-          annotations: area.annotations,
-        }
-        void saveFileMemory(record).catch(() => undefined)
-      })
-    }, 700)
-    return () => window.clearTimeout(timer)
-  }, [workAreas, activeWorkAreaId])
 
   useEffect(() => {
     fetch('/api/health').then((r) => r.json()).then((data) => setConfigured(data.configured)).catch(() => setConfigured(false))
@@ -437,22 +371,19 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     let active = true
-    const applyRecords = (records: FileMemorySummary[]) => {
+    const applyRecords = (records: ProjectSummary[]) => {
       if (!active) return
       setProjectMemories(records)
-      setWorkAreas((existing) => {
-        const restored = records.map((record): WorkArea => {
-        const loaded = existing.find((area) => area.memoryKey === record.id)
-        if (loaded) return loaded
-        const file = new File([], record.fileName, { type: record.fileType, lastModified: record.lastModified })
-        return { id: makeId(), memoryKey: record.id, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: '', file }, pdf: null, documentText: '', selectedText: '', selections: [], conversations: [], activeConversationId: '', customPrompt: '', zoom: 1, currentPage: 1, areaSelectionEnabled: false, scope: 'selection', note: '', noteAssets: {}, highlights: [], annotations: [], sourceLoaded: false }
+      setProjects((existing) => {
+        const restored = records.map((record): RuntimeProject => existing.find((project) => project.id === record.id) || {
+          id: record.id, name: record.name, files: [], conversations: [], activeConversationId: '', activeFileId: record.activeFileId,
+          projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: record.updatedAt, updatedAt: record.updatedAt, hydrated: false,
         })
         const recordIds = new Set(records.map((record) => record.id))
-        return [...restored, ...existing.filter((area) => !recordIds.has(area.memoryKey))]
+        return [...restored, ...existing.filter((project) => !recordIds.has(project.id))]
       })
     }
-    void listFileMemories().then(applyRecords).catch(() => undefined)
-    void migrateLegacyFileMemories().then(() => listFileMemories()).then(applyRecords).catch(() => undefined)
+    void projectRepository.list().then(applyRecords).catch(() => undefined)
     return () => { active = false }
   }, [])
 
@@ -510,27 +441,113 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     chatAutoFollowRef.current = container.scrollHeight - top - container.clientHeight <= 24
   }
 
-  const snapshotCurrent = (): WorkArea | null => source && activeWorkAreaId ? {
-    id: activeWorkAreaId, memoryKey: getFileMemoryId(source.file), source, pdf, documentText, selectedText, selections,
-    conversations: conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item),
-    activeConversationId, customPrompt,
-    zoom, currentPage, areaSelectionEnabled, scope, note, noteAssets, highlights, annotations, sourceLoaded: true,
-  } : null
+  const snapshotCurrent = useCallback((): RuntimeProject | null => {
+    if (!activeProjectId) return null
+    const project = projects.find((item) => item.id === activeProjectId)
+    if (!project) return null
+    const syncedConversations = conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item)
+    return {
+      ...project,
+      files: project.files.map((file) => file.id === activeFileId ? {
+        ...file, source: source || file.source, pdf, sourceLoaded: Boolean(source || file.source),
+        readingState: { page: currentPage, zoom, scrollTop: readerScrollRef.current?.scrollTop || 0 },
+        highlights, annotations, updatedAt: Date.now(),
+      } : file),
+      conversations: syncedConversations, activeConversationId, activeFileId,
+      projectNotes: note, projectNoteAssets: noteAssets, updatedAt: Date.now(), hydrated: true,
+    }
+  }, [activeProjectId, projects, conversations, activeConversationId, history, activeFileId, source, pdf, currentPage, zoom, highlights, annotations, note, noteAssets])
 
-  const loadWorkArea = (area: WorkArea) => {
-    setSource(area.source); setPdf(area.pdf); setDocumentText(area.documentText); setSelectedText(area.selectedText)
-    setSelections(area.selections); setConversations(area.conversations); setActiveConversationId(area.activeConversationId)
-    selectionsRef.current = area.selections
-    setHistory(area.conversations.find((item) => item.id === area.activeConversationId)?.history || [])
-    setCustomPrompt(area.customPrompt); setZoom(area.zoom)
-    setCurrentPage(area.currentPage); setAreaSelectionEnabled(area.areaSelectionEnabled); setScope(area.scope); setError('')
-    setNote(area.note || ''); setNoteAssets(area.noteAssets || {}); setHighlights(area.highlights || []); setAnnotations(area.annotations || []); setAnnotationMode(false); setCitationFocus(null)
-    activeWorkAreaIdRef.current = area.id
-    activeConversationIdRef.current = area.activeConversationId
-    pendingPageRestoreRef.current = area.currentPage
+  useEffect(() => {
+    if (!activeProjectId) return
+    const timer = window.setTimeout(() => {
+      const snapshot = snapshotCurrent()
+      if (snapshot) void projectRepository.save(snapshot).then(() => projectRepository.list()).then(setProjectMemories).catch(() => undefined)
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [activeProjectId, snapshotCurrent])
+
+  const loadProjectFile = (project: RuntimeProject, file: RuntimeProjectFile | null) => {
+    setActiveProjectId(project.id); activeProjectIdRef.current = project.id
+    setActiveFileId(file?.id || null); activeFileIdRef.current = file?.id || null
+    readerControllerRef.current.activate(project.id, file?.id || null)
+    setSource(file?.source || null); setPdf(file?.pdf || null)
+    setDocumentText(file?.paragraphs.map((paragraph) => paragraph.text).join('\n\n') || '')
+    setSelectedText(''); setSelections([]); selectionsRef.current = []
+    setConversations(project.conversations); setActiveConversationId(project.activeConversationId)
+    activeConversationIdRef.current = project.activeConversationId
+    setHistory(project.conversations.find((item) => item.id === project.activeConversationId)?.history || [])
+    setCustomPrompt(''); setZoom(file?.readingState.zoom || 1); setCurrentPage(file?.readingState.page || 1)
+    setNote(project.projectNotes || ''); setNoteAssets(project.projectNoteAssets || {})
+    setHighlights(file?.highlights || []); setAnnotations(file?.annotations || [])
+    setAnnotationMode(false); setTagMode(false); setCitationFocus(null); setError('')
+    pendingPageRestoreRef.current = file?.readingState.page || 1
   }
 
-  const openFile = async (file: File) => {
+  const hydrateProject = async (project: RuntimeProject) => {
+    if (project.hydrated) return project
+    const stored = await projectRepository.get(project.id)
+    if (!stored) throw new Error(pack.code === 'en-US' ? 'The project is missing.' : '项目数据缺失。')
+    return { ...stored, files: stored.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true } as RuntimeProject
+  }
+
+  const hydrateProjectFile = async (project: RuntimeProject, fileId: string) => {
+    const file = project.files.find((item) => item.id === fileId)
+    if (!file) throw new Error(pack.code === 'en-US' ? 'The file no longer exists.' : '文件已被删除或不存在。')
+    if (file.sourceLoaded && file.source) return { project, file }
+    const blob = await projectRepository.getSource(project.id, file.id, file.type)
+    if (!blob) throw new Error(pack.code === 'en-US' ? 'The project source file is missing.' : '项目源文件缺失。')
+    const sourceFile = new File([blob], file.name, { type: file.type, lastModified: file.lastModified })
+    const hydratedFile: RuntimeProjectFile = { ...file, source: { name: file.name, kind: file.kind, url: URL.createObjectURL(sourceFile), file: sourceFile }, pdf: null, sourceLoaded: true }
+    const hydratedProject = { ...project, files: project.files.map((item) => item.id === file.id ? hydratedFile : item), hydrated: true }
+    return { project: hydratedProject, file: hydratedFile }
+  }
+
+  const openProjectFile = async (projectId: string, fileId: string): Promise<boolean> => {
+    const snapshot = snapshotCurrent()
+    let project = snapshot?.id === projectId ? snapshot : projects.find((item) => item.id === projectId)
+    if (!project) return false
+    try {
+      project = await hydrateProject(project)
+      const hydrated = await hydrateProjectFile(project, fileId)
+      project = { ...hydrated.project, activeFileId: fileId }
+      setProjects((items) => items.map((item) => item.id === projectId ? project! : snapshot && item.id === snapshot.id ? snapshot : item))
+      if (snapshot && snapshot.id !== projectId) void projectRepository.save(snapshot)
+      loadProjectFile(project, hydrated.file)
+      return true
+    } catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')); return false }
+  }
+
+  const openProject = async (id: string) => {
+    if (id === activeProjectId && activeFileId) return
+    const candidate = projects.find((item) => item.id === id)
+    if (!candidate) return
+    try {
+      const project = await hydrateProject(candidate)
+      const fileId = project.activeFileId || project.files[0]?.id || null
+      if (fileId) await openProjectFile(id, fileId)
+      else {
+        const snapshot = snapshotCurrent()
+        if (snapshot) void projectRepository.save(snapshot)
+        setProjects((items) => items.map((item) => item.id === id ? project : snapshot && item.id === snapshot.id ? snapshot : item))
+        loadProjectFile(project, null)
+      }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')) }
+  }
+
+  const createEmptyProject = (requestedName: string) => {
+    const name = requestedName.trim()
+    if (!name) return
+    const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
+    const now = Date.now()
+    const project: RuntimeProject = { id: makeId(), name, files: [], conversations: [conversation], activeConversationId: conversation.id, activeFileId: null, projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: now, updatedAt: now, hydrated: true }
+    const snapshot = snapshotCurrent()
+    setProjects((items) => [...items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item), project])
+    loadProjectFile(project, null)
+    void projectRepository.save(project).then(() => projectRepository.list()).then(setProjectMemories)
+  }
+
+  const openFile = async (file: File, targetProjectId: string | null = activeProjectId) => {
     let readableFile = file
     const lowerName = file.name.toLocaleLowerCase()
     const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf')
@@ -556,55 +573,35 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         setBusy(''); setProgress('')
       }
     }
-    const memoryKey = getFileMemoryId(readableFile)
-    const alreadyOpen = workAreas.find((area) => area.memoryKey === memoryKey)
-    if (alreadyOpen) {
-      openWorkArea(alreadyOpen.id)
-      return
-    }
     const snapshot = snapshotCurrent()
-    const id = makeId()
-    let remembered: FileMemoryRecord | undefined
-    try { remembered = await getFileMemory(memoryKey) } catch { remembered = undefined }
-    forgottenFileKeysRef.current.delete(memoryKey)
-    const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
-    const restoredConversations = remembered ? remembered.conversations || [] : [conversation]
-    const restoredActiveConversationId = restoredConversations.some((item) => item.id === remembered?.activeConversationId)
-      ? remembered!.activeConversationId
-      : restoredConversations[0]?.id || ''
-    const next: WorkArea = {
-      id, memoryKey, source: { name: readableFile.name, kind: readableFile.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(readableFile), file: readableFile },
-      pdf: null, documentText: remembered?.documentTextVersion === 7 ? remembered.documentText || '' : '', selectedText: '', selections: [], conversations: restoredConversations, activeConversationId: restoredActiveConversationId, customPrompt: '', zoom: remembered?.zoom || 1,
-      currentPage: remembered?.currentPage || 1, areaSelectionEnabled: remembered?.areaSelectionEnabled || false, scope: remembered?.scope || 'selection', note: remembered?.note || '', noteAssets: remembered?.noteAssets || {}, highlights: remembered?.highlights || [], annotations: remembered?.annotations || [], sourceLoaded: true,
+    let project = snapshot?.id === targetProjectId ? snapshot : projects.find((item) => item.id === targetProjectId)
+    if (project && !project.hydrated) project = await hydrateProject(project)
+    if (!project) {
+      const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
+      const now = Date.now()
+      project = { id: makeId(), name: readableFile.name.replace(/\.[^.]+$/, ''), files: [], conversations: [conversation], activeConversationId: conversation.id, activeFileId: null, projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: now, updatedAt: now, hydrated: true }
     }
-    setWorkAreas((items) => [...items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item), next])
-    setActiveWorkAreaId(id)
-    activeWorkAreaIdRef.current = id
-    loadWorkArea(next)
-  }
-
-  const hydrateWorkArea = async (area: WorkArea): Promise<WorkArea> => {
-    if (area.sourceLoaded !== false) return area
-    const record = await getFileMemory(area.memoryKey)
-    if (!record?.fileBlob) throw new Error(pack.code === 'en-US' ? 'The project source file is missing.' : '项目源文件缺失。')
-    const file = new File([record.fileBlob], record.fileName, { type: record.fileType, lastModified: record.lastModified })
-    const conversations = record.conversations || []
-    const activeConversationId = conversations.some((item) => item.id === record.activeConversationId) ? record.activeConversationId : conversations[0]?.id || ''
-    return { ...area, source: { name: file.name, kind: file.type === 'application/pdf' ? 'pdf' : 'image', url: URL.createObjectURL(file), file }, documentText: record.documentTextVersion === 7 ? record.documentText || '' : '', conversations, activeConversationId, zoom: record.zoom || 1, currentPage: record.currentPage || 1, areaSelectionEnabled: record.areaSelectionEnabled || false, scope: record.scope || 'selection', note: record.note || '', noteAssets: record.noteAssets || {}, highlights: record.highlights || [], annotations: record.annotations || [], sourceLoaded: true }
-  }
-
-  const openWorkArea = async (id: string) => {
-    if (id === activeWorkAreaId) { pendingPageRestoreRef.current = currentPage; return }
-    const snapshot = snapshotCurrent()
-    const storedTarget = workAreas.find((item) => item.id === id)
-    if (!storedTarget) return
-    let target: WorkArea
-    try { target = await hydrateWorkArea(storedTarget) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')); return }
-    setWorkAreas((items) => items.map((item) => item.id === target.id ? target : snapshot && item.id === snapshot.id ? snapshot : item))
-    setActiveWorkAreaId(id)
-    activeWorkAreaIdRef.current = id
-    loadWorkArea(target)
+    const duplicate = project.files.find((item) => item.name === readableFile.name && item.size === readableFile.size && item.lastModified === readableFile.lastModified)
+    if (duplicate) { await openProjectFile(project.id, duplicate.id); return }
+    const now = Date.now()
+    const fileId = makeId()
+    const fileKind = readableFile.type === 'application/pdf' || readableFile.name.toLocaleLowerCase().endsWith('.pdf') ? 'pdf' : 'image'
+    const projectFile: RuntimeProjectFile = {
+      id: fileId, projectId: project.id, name: readableFile.name, kind: fileKind, type: readableFile.type || (fileKind === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
+      size: readableFile.size, lastModified: readableFile.lastModified, createdAt: now, updatedAt: now,
+      readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], paragraphs: [],
+      indexState: { status: 'pending', version: documentIndexVersion },
+      source: { name: readableFile.name, kind: fileKind, url: URL.createObjectURL(readableFile), file: readableFile }, pdf: null, sourceLoaded: true,
+    }
+    project = { ...project, files: [...project.files, projectFile], activeFileId: fileId, updatedAt: now, hydrated: true }
+    await projectRepository.saveSource(project.id, fileId, readableFile)
+    await projectRepository.save(project)
+    setProjects((items) => {
+      const without = items.filter((item) => item.id !== project!.id).map((item) => snapshot && item.id === snapshot.id ? snapshot : item)
+      return [...without, project!]
+    })
+    loadProjectFile(project, projectFile)
+    setProjectMemories(await projectRepository.list())
   }
 
   const syncCurrentConversation = () => conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item)
@@ -633,18 +630,24 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const createConversationForArea = async (areaId: string) => {
     setCollapsedProjectIds((items) => { const next = new Set(items); next.delete(areaId); return next })
-    if (areaId === activeWorkAreaId) createConversation()
+    if (areaId === activeProjectId) createConversation()
     else {
-      const storedTarget = workAreas.find((item) => item.id === areaId)
+      const storedTarget = projects.find((item) => item.id === areaId)
       if (!storedTarget) return
-      let target: WorkArea
-      try { target = await hydrateWorkArea(storedTarget) }
+      let target: RuntimeProject
+      try { target = await hydrateProject(storedTarget) }
       catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')); return }
       const snapshot = snapshotCurrent()
       const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
       const next = { ...target, conversations: [...target.conversations, conversation], activeConversationId: conversation.id }
-      setWorkAreas((items) => items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item).map((item) => item.id === areaId ? next : item))
-      setActiveWorkAreaId(areaId); activeWorkAreaIdRef.current = areaId; loadWorkArea(next)
+      let readyProject: RuntimeProject = next
+      let readyFile: RuntimeProjectFile | null = null
+      if (next.activeFileId) {
+        const hydrated = await hydrateProjectFile(next, next.activeFileId)
+        readyProject = hydrated.project; readyFile = hydrated.file
+      }
+      setProjects((items) => items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item).map((item) => item.id === areaId ? readyProject : item))
+      loadProjectFile(readyProject, readyFile)
     }
     setPanelLayouts((items) => ({ ...items, chat: { ...items.chat, open: true, z: nextPanelZ(items) } }))
   }
@@ -657,6 +660,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setActiveConversationId(next?.id || '')
     activeConversationIdRef.current = next?.id || ''
     setHistory(next?.history || [])
+    setCitationFocus(null)
     setError('')
   }
 
@@ -708,7 +712,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
   })
 
-  const onPdfReady = useCallback((document: PDFDocumentProxy) => setPdf(document), [])
+  const onPdfReady = useCallback((document: PDFDocumentProxy) => {
+    setPdf(document)
+    const projectId = activeProjectIdRef.current
+    const fileId = activeFileIdRef.current
+    if (projectId && fileId) setProjects((items) => items.map((project) => project.id === projectId ? { ...project, files: project.files.map((file) => file.id === fileId ? { ...file, pdf: document } : file) } : project))
+  }, [])
 
   useEffect(() => {
     if (source?.kind !== 'pdf' || !pdf || pendingPageRestoreRef.current === null) return
@@ -767,12 +776,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         return
       }
       zoomPageLockRef.current = null
-      const navigation = citationNavigationRef.current
-      if (navigation && Date.now() < navigation.until) {
-        setCurrentPage(navigation.page)
-        return
-      }
-      citationNavigationRef.current = null
       const targetY = container.getBoundingClientRect().top + container.clientHeight * 0.38
       let closestPage = currentPage
       let closestDistance = Number.POSITIVE_INFINITY
@@ -835,13 +838,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return workerPromiseRef.current
   }, [t])
 
-  useEffect(() => {
-    if (!source) return
-    const timer = setTimeout(() => { void getWorker().catch(() => undefined) }, 500)
-    return () => clearTimeout(timer)
-  }, [source, getWorker])
-
-  const recognize = async (image: string) => {
+  const recognize = useCallback(async (image: string) => {
     showOcrProgressRef.current = true
     setProgress(t('preparingOcr'))
     const worker = await getWorker()
@@ -851,7 +848,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     } finally {
       showOcrProgressRef.current = false
     }
-  }
+  }, [getWorker, t])
 
   const onSelect = async (result: SelectionResult) => {
     const selectionId = makeId()
@@ -867,6 +864,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         let part = ''
         if (source?.kind === 'pdf' && pdf) {
           setProgress(t('readingPdfText'))
+          const { extractPdfRegionText } = await import('./lib/pdf')
           part = await extractPdfRegionText(pdf, selectedRegion.page, selectedRegion.region)
         }
         if (!part && !aiConfig.visionEnabled) part = await recognize(result.images[index])
@@ -908,67 +906,68 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     })
   }
 
-  const buildDocumentContext = async (workspaceId: string) => {
-    if (documentText) return documentText
-    if (!source) return ''
-    const report = (message: string) => { if (activeWorkAreaIdRef.current === workspaceId) setProgress(message) }
-    report(source.kind === 'pdf' ? t('readingDocument') : t('readingImage'))
-    try {
-      let text = ''
-      if (source.kind === 'image') {
-        const recognized = await recognize(source.url)
-        text = `[第 1 页]\n[[REF:1|PAGE:1|RECT:0.02000,0.02000,0.96000,0.96000]] ${recognized.replace(/\s*\n\s*/g, ' ')}`
-      } else if (pdf) {
-        text = await extractPdfText(pdf, (done, total) => report(`${t('extracting')} ${done}/${total}`))
-        const contentLength = text.replace(/\[第 \d+ 页\]|\s/g, '').length
-        if (contentLength < 80) {
-          const ocrPages: string[] = []
-          const pageNumbers = Array.from({ length: pdf.numPages }, (_, index) => index + 1)
-          for (let index = 0; index < pageNumbers.length; index += 1) {
-            const pageNumber = pageNumbers[index]
-            report(`${t('scannedOcr')} ${index + 1}/${pageNumbers.length}`)
+  useEffect(() => {
+    if (!source || !activeProjectId || !activeFileId || (source.kind === 'pdf' && !pdf)) return
+    const project = projects.find((item) => item.id === activeProjectId)
+    const file = project?.files.find((item) => item.id === activeFileId)
+    if (!project || !file || file.indexState.status === 'indexing' || file.indexState.status === 'ready') return
+    const timer = window.setTimeout(() => {
+      const indexing = { ...file, indexState: { status: 'indexing' as const, version: documentIndexVersion } }
+      setProjects((items) => items.map((item) => item.id === project.id ? { ...item, files: item.files.map((entry) => entry.id === file.id ? indexing : entry) } : item))
+      const task = source.kind === 'pdf' && pdf
+        ? import('./services/documentIndexer').then(({ documentIndexer }) => documentIndexer.indexPdf(pdf, project.id, file.id, (done, total) => setProgress(`${t('extracting')} ${done}/${total}`)))
+        : recognize(source.url).then((text) => ({
+            paragraphs: text.trim() ? [{ id: `${file.id}:image`, projectId: project.id, fileId: file.id, page: 1, region: { left: .02, top: .02, width: .96, height: .96 }, text: text.replace(/\s+/g, ' ').trim(), textHash: `${text.length}:${text.slice(0, 40)}`, order: 0 }] : [],
+            state: { status: 'ready' as const, version: documentIndexVersion, indexedAt: Date.now() },
+          }))
+      void task.then(async ({ paragraphs, state }) => {
+        if (source.kind === 'pdf' && pdf && paragraphs.reduce((sum, paragraph) => sum + paragraph.text.length, 0) < 80) {
+          const ocrParagraphs = []
+          for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+            setProgress(`${t('scannedOcr')} ${pageNumber}/${pdf.numPages}`)
             const page = await pdf.getPage(pageNumber)
             const viewport = page.getViewport({ scale: 1.25 })
-            const canvas = document.createElement('canvas')
-            canvas.width = viewport.width
-            canvas.height = viewport.height
+            const canvas = document.createElement('canvas'); canvas.width = viewport.width; canvas.height = viewport.height
             const context = canvas.getContext('2d')
-            if (!context) continue
-            await page.render({ canvasContext: context, viewport, canvas }).promise
-            const recognized = await recognize(canvas.toDataURL('image/jpeg', 0.9))
-            ocrPages.push(`[第 ${pageNumber} 页]\n[[REF:${pageNumber}|PAGE:${pageNumber}|RECT:0.02000,0.02000,0.96000,0.96000]] ${recognized.replace(/\s*\n\s*/g, ' ')}`)
+            if (context) {
+              await page.render({ canvasContext: context, viewport, canvas }).promise
+              const text = (await recognize(canvas.toDataURL('image/jpeg', .9))).replace(/\s+/g, ' ').trim()
+              if (text) ocrParagraphs.push({ id: `${file.id}:ocr:${pageNumber}`, projectId: project.id, fileId: file.id, page: pageNumber, region: { left: .02, top: .02, width: .96, height: .96 }, text, textHash: stableTextHash(text), order: ocrParagraphs.length })
+            }
             page.cleanup()
           }
-          text = ocrPages.join('\n\n')
+          if (ocrParagraphs.length) paragraphs = ocrParagraphs
         }
-      }
-      if (activeWorkAreaIdRef.current === workspaceId) setDocumentText(text)
-      else setWorkAreas((items) => items.map((item) => item.id === workspaceId ? { ...item, documentText: text } : item))
-      return text
-    } finally {
-      if (activeWorkAreaIdRef.current === workspaceId) setProgress('')
-    }
+        setDocumentText(paragraphs.map((paragraph) => paragraph.text).join('\n\n'))
+        setProjects((items) => items.map((item) => item.id === project.id ? { ...item, updatedAt: Date.now(), files: item.files.map((entry) => entry.id === file.id ? { ...entry, paragraphs, indexState: state, updatedAt: Date.now() } : entry) } : item))
+      }).catch((reason) => {
+        setProjects((items) => items.map((item) => item.id === project.id ? { ...item, files: item.files.map((entry) => entry.id === file.id ? { ...entry, indexState: { status: 'error', version: documentIndexVersion, error: reason instanceof Error ? reason.message : String(reason) } } : entry) } : item))
+      })
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [source, pdf, activeProjectId, activeFileId, projects, recognize, t])
+
+  const buildProjectContext = (workspaceId: string, query: string, action: AiAction, fileId?: string) => {
+    const project = snapshotCurrent()?.id === workspaceId ? snapshotCurrent() : projects.find((item) => item.id === workspaceId)
+    if (!project) return { context: '', references: [] }
+    const strategy = fileId ? 'document' : 'project'
+    const coverageRatio = action === 'summarize' || action === 'translate' ? (fileId ? .78 : .65) : undefined
+    const result = retrievalService.retrieve(project, query, { strategy, coverageRatio, fileId, maxHits: 24, maxCharacters: 39000 })
+    const references = createReferences(project, result.hits, 24)
+    return { context: createCitationContext(references), references }
   }
 
-  useEffect(() => {
-    if (!source || documentText || (source.kind === 'pdf' && !pdf)) return
-    const timer = window.setTimeout(() => { if (activeWorkAreaId) void buildDocumentContext(activeWorkAreaId).catch(() => undefined) }, 250)
-    return () => window.clearTimeout(timer)
-    // Indexing intentionally starts once per opened source as soon as its renderer is ready.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source?.url, pdf])
-
   const updateConversationRoute = (workspaceId: string, conversationId: string, update: (conversation: Conversation) => Conversation) => {
-    if (activeWorkAreaIdRef.current === workspaceId) {
+    if (activeProjectIdRef.current === workspaceId) {
       setConversations((items) => items.map((item) => item.id === conversationId ? update(item) : item))
       if (activeConversationIdRef.current === conversationId) {
         setHistory((items) => update({ id: conversationId, title: '', history: items }).history)
       }
       return
     }
-    setWorkAreas((items) => items.map((area) => area.id === workspaceId
-      ? { ...area, conversations: area.conversations.map((item) => item.id === conversationId ? update(item) : item) }
-      : area))
+    setProjects((items) => items.map((project) => project.id === workspaceId
+      ? { ...project, conversations: project.conversations.map((item) => item.id === conversationId ? update(item) : item) }
+      : project))
   }
 
   const importSkillFolder = async () => {
@@ -1016,25 +1015,19 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const changeMemorySettings = (settings: MemorySettings) => setMemorySettings(settings)
   const changeUserMemory = (value: string) => setUserMemory(value.slice(0, 12000))
 
-  const deleteProject = async (memoryKey: string) => {
-    forgottenFileKeysRef.current.add(memoryKey)
-    await deleteFileMemory(memoryKey)
-    const target = workAreas.find((area) => area.memoryKey === memoryKey)
-    if (target) URL.revokeObjectURL(target.source.url)
-    const remaining = workAreas.filter((area) => area.memoryKey !== memoryKey)
-    setWorkAreas(remaining)
-    if (target?.id === activeWorkAreaId) {
+  const deleteProject = async (projectId: string) => {
+    const target = projects.find((project) => project.id === projectId)
+    target?.files.forEach((file) => { if (file.source?.url) URL.revokeObjectURL(file.source.url) })
+    await projectRepository.deleteProject(projectId)
+    const remaining = projects.filter((project) => project.id !== projectId)
+    setProjects(remaining)
+    navigationRef.current.clear(); setNavigationDepth(0)
+    if (projectId === activeProjectId) {
       const next = remaining.at(-1)
-      if (next) {
-        try {
-          const hydrated = await hydrateWorkArea(next)
-          setWorkAreas((items) => items.map((item) => item.id === hydrated.id ? hydrated : item))
-          setActiveWorkAreaId(hydrated.id); loadWorkArea(hydrated)
-        } catch { setActiveWorkAreaId(null); activeWorkAreaIdRef.current = null; setSource(null) }
-      }
-      else { setActiveWorkAreaId(null); activeWorkAreaIdRef.current = null; setSource(null); setAnnotations([]); setAnnotationMode(false) }
+      if (next) await openProject(next.id)
+      else { setActiveProjectId(null); setActiveFileId(null); activeProjectIdRef.current = null; activeFileIdRef.current = null; readerControllerRef.current.clear(); setSource(null); setAnnotations([]); setAnnotationMode(false); setTagMode(false) }
     }
-    setProjectMemories(await listFileMemories())
+    setProjectMemories(await projectRepository.list())
   }
 
   const learnUserMemory = (userRequest: string, assistantResponse: string) => {
@@ -1062,7 +1055,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const runAi = async (action: AiAction, instruction = '') => {
     setError('')
-    if (!source || !activeWorkAreaId) return
+    if (!source || !activeProjectId) return
     let effectiveInstruction = instruction.trim()
     let requestedSkillId = ''
     if (action === 'custom' && effectiveInstruction.startsWith('/')) {
@@ -1075,7 +1068,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       requestedSkillId = requestedSkill.id
       effectiveInstruction = commandMatch?.[2]?.trim() || (pack.code === 'en-US' ? 'Apply this skill to the current material.' : '请使用此 Skill 处理当前材料。')
     }
-    const workspaceId = activeWorkAreaId
+    const workspaceId = activeProjectId
     let conversationId = activeConversationId
     let previousHistory = history
     if (!conversationId || !conversations.some((item) => item.id === conversationId)) {
@@ -1091,20 +1084,23 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     if (aiTasks.has(taskKey)) return
     chatFollowSuspendedRef.current = false
     chatAutoFollowRef.current = true
-    const targetIsDocument = scope === 'document'
-    const selectionImages = targetIsDocument ? [] : selections.flatMap((item) => item.images).slice(0, 4)
-    const selectionUsesText = !targetIsDocument && Boolean(selectedText.trim())
+    const targetUsesContext = scope !== 'selection'
+    const targetIsProject = scope === 'project'
+    const selectionImages = targetUsesContext ? [] : selections.flatMap((item) => item.images).slice(0, 4)
+    const selectionUsesText = !targetUsesContext && Boolean(selectedText.trim())
     const fastSelectionTranslation = selectionUsesText && action === 'translate'
     const requestImages = selectionUsesText ? [] : selectionImages
     const reasoningActive = deepThinking && aiConfig.reasoningEnabled
     const actionLabel = (requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId)?.name : effectiveInstruction) || ({ translate: t('translate'), explain: t('explain'), insight: t('insight'), summarize: t('summarize'), custom: 'AI' }[action])
-    const emptySelectionChat = !targetIsDocument && !selectionUsesText && selectionImages.length === 0 && action === 'custom' && Boolean(effectiveInstruction)
-    const userLabel = emptySelectionChat ? t('selectedScope') : `${targetIsDocument ? t('documentScope') : t('selectedScope')} · ${actionLabel}`
-    const targetText = targetIsDocument ? (documentText || source.name) : emptySelectionChat ? effectiveInstruction : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
-    const contextMode: ChatMessage['contextMode'] = targetIsDocument ? 'document' : 'selection'
-    const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, contextMode, label: userLabel, sourcePage: currentPage }
+    const emptySelectionChat = !targetUsesContext && !selectionUsesText && selectionImages.length === 0 && action === 'custom' && Boolean(effectiveInstruction)
+    const scopeLabel = targetIsProject ? '项目' : targetUsesContext ? t('documentScope') : t('selectedScope')
+    const userLabel = emptySelectionChat ? t('selectedScope') : `${scopeLabel} · ${actionLabel}`
+    const activeProjectName = projects.find((item) => item.id === activeProjectId)?.name || source.name
+    const targetText = targetIsProject ? `项目：${activeProjectName}` : targetUsesContext ? `文件：${source.name}` : emptySelectionChat ? effectiveInstruction : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
+    const contextMode: ChatMessage['contextMode'] = scope
+    const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, prompt: effectiveInstruction || actionLabel, contextMode, label: userLabel, sourcePage: currentPage }
     const assistantId = makeId()
-    const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', contextMode, citationsDisabled: !targetIsDocument }
+    const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', contextMode, citationsDisabled: !targetUsesContext }
     const requestHistory = [...previousHistory, userMessage]
     const visibleHistory = [...requestHistory, assistantMessage]
     setHistory(visibleHistory)
@@ -1118,28 +1114,32 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     abortControllersRef.current.set(taskKey, requestController)
     setCustomPrompt('')
     try {
-      const context = targetIsDocument ? await buildDocumentContext(workspaceId) : ''
-      const annotationContext = targetIsDocument ? annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[第 ${annotation.page} 页批注]\n${annotation.text.trim()}`).join('\n\n') : ''
+      const retrieval = targetUsesContext ? buildProjectContext(workspaceId, effectiveInstruction || actionLabel, action, targetIsProject ? undefined : activeFileId || undefined) : { context: '', references: [] }
+      const targetProject = snapshotCurrent()
+      const annotationContext = !targetUsesContext ? '' : targetIsProject
+        ? (targetProject?.files || []).flatMap((file) => file.annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[${file.name}｜第 ${annotation.page} 页批注]\n${annotation.text.trim()}`)).join('\n\n')
+        : annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[第 ${annotation.page} 页批注]\n${annotation.text.trim()}`).join('\n\n')
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: requestController.signal,
         body: JSON.stringify({
           action,
-          selectedText: targetIsDocument ? '' : selectedText,
-          documentText: [context, annotationContext].filter(Boolean).join('\n\n'),
+          selectedText: targetUsesContext ? '' : selectedText,
+          documentText: [retrieval.context, annotationContext].filter(Boolean).join('\n\n'),
+          references: retrieval.references,
           instruction: effectiveInstruction,
-          includeContext: targetIsDocument && Boolean(context),
+          includeContext: targetUsesContext && Boolean(retrieval.context),
           contextMode,
-          anchorPages: targetIsDocument ? [] : Array.from(new Set(selections.flatMap((item) => item.regions.map((region) => region.page)).concat(currentPage))),
-          history: targetIsDocument ? previousHistory.map(({ role, content }) => ({ role, content })) : recentSelectionHistory(previousHistory),
+          anchorPages: targetUsesContext ? [] : Array.from(new Set(selections.flatMap((item) => item.regions.map((region) => region.page)).concat(currentPage))),
+          history: targetUsesContext ? previousHistory.map(({ role, content, prompt }) => ({ role, content: role === 'user' ? prompt || content : content })) : recentSelectionHistory(previousHistory),
           aiConfig,
           deepThinking: fastSelectionTranslation ? false : reasoningActive,
           responseLanguage: pack.aiLanguage,
-          userMemory: targetIsDocument && memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
+          userMemory: targetUsesContext && memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
           selectionHasImages: requestImages.length > 0,
           selectionImages: aiConfig.visionEnabled ? requestImages : [],
-          skills: targetIsDocument || requestedSkillId ? skills.map(({ id, name, command, description, instructions }) => ({ id, name, command, description, instructions })) : [],
+          skills: targetUsesContext || requestedSkillId ? skills.map(({ id, name, command, description, instructions }) => ({ id, name, command, description, instructions })) : [],
           requestedSkillId,
         }),
       })
@@ -1151,7 +1151,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         }
         if (event.type === 'done') {
           streamedContent = event.content
-          updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetIsDocument && Array.isArray(event.references) ? event.references : undefined } : message) }))
+          updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetUsesContext && Array.isArray(event.references) ? event.references : undefined } : message) }))
         }
       })
       learnUserMemory(effectiveInstruction || actionLabel, done.content)
@@ -1173,10 +1173,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const next = history.filter((message) => message.id !== id)
     setHistory(next)
     setConversations((items) => items.map((item) => item.id === activeConversationId ? { ...item, history: next } : item))
+    setCitationFocus(null)
   }
 
-  const jumpToPage = (page: number, regionTop?: number) => {
-    const safePage = Math.max(1, Math.min(pdf?.numPages || 1, page))
+  const jumpToPage = (page: number, regionTop?: number, storedScrollTop?: number) => {
+    const safePage = Math.max(1, page)
     setCurrentPage(safePage)
     const scrollWhenRendered = (attempt = 0) => requestAnimationFrame(() => {
       const container = readerScrollRef.current
@@ -1188,10 +1189,52 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       })
       if ((target.classList.contains('pdf-page-placeholder') || !nearbyPagesReady) && attempt < 180) return scrollWhenRendered(attempt + 1)
       const regionOffset = typeof regionTop === 'number' ? target.getBoundingClientRect().height * regionTop - container.clientHeight * .22 : -20
-      container.scrollTo({ top: target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop + regionOffset, behavior: 'auto' })
+      const top = typeof storedScrollTop === 'number' && regionTop === undefined ? storedScrollTop : target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop + regionOffset
+      container.scrollTo({ top, behavior: 'auto' })
       setCurrentPage(safePage)
     })
     scrollWhenRendered()
+  }
+
+  const captureReaderLocation = () => readerControllerRef.current.current(currentPage, zoom, readerScrollRef.current?.scrollTop || 0)
+
+  const applyReaderLocation = async (location: ReaderLocation, showFocus = true) => {
+    const project = projects.find((item) => item.id === location.projectId) || (await projectRepository.get(location.projectId).then((item) => item ? ({ ...item, hydrated: true } as RuntimeProject) : null))
+    if (!project || !project.files.some((file) => file.id === location.fileId)) { setError('引用或标签对应的文件已被删除。'); return false }
+    const opened = await openProjectFile(location.projectId, location.fileId)
+    if (!opened) return false
+    if (location.zoom) setZoom(location.zoom)
+    setCitationFocus(showFocus && location.region ? { page: location.page, region: location.region } : null)
+    jumpToPage(location.page, location.region?.top, location.scrollTop)
+    window.setTimeout(() => setCitationFocus(null), 2400)
+    return true
+  }
+
+  const navigateToLocation = async (location: ReaderLocation, showFocus = true) => {
+    await navigationRef.current.navigate(location, captureReaderLocation, (target) => applyReaderLocation(target, showFocus))
+    setNavigationDepth(navigationRef.current.depth)
+  }
+
+  const navigateBack = async () => {
+    await navigationRef.current.back(applyReaderLocation)
+    setNavigationDepth(navigationRef.current.depth)
+  }
+
+  const openTag = (tag: DocumentTag) => void navigateToLocation({ projectId: tag.projectId, fileId: tag.fileId, page: tag.page, region: tag.region }, false)
+
+  const openReference = (reference: NonNullable<ChatMessage['references']>[number]) => {
+    const project = projects.find((item) => item.id === reference.projectId)
+    if (project?.hydrated && !validateReference(project, reference)) { setError('引用已失效，原段落可能已被删除或重新索引。'); return }
+    void navigateToLocation({ projectId: reference.projectId, fileId: reference.fileId, page: reference.page, region: reference.region })
+  }
+
+  const addTagAt = (page: number, region: NormalizedRegion) => {
+    if (!activeProjectId || !activeFileId) return
+    const tag = createTag(activeProjectId, activeFileId, page, region, '')
+    setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: [...project.tags, tag], updatedAt: Date.now() } : project))
+    setRecentTagId(tag.id)
+    setCitationFocus({ page, region })
+    window.setTimeout(() => setCitationFocus(null), 1800)
   }
 
   const addTextToAi = (text: string) => {
@@ -1229,25 +1272,39 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return ''
   }, [busy, progress, selectedText, selections.length, hasVisualSelection, t])
 
-  const updatePanel = (id: PanelId, layout: PanelLayout) => setPanelLayouts((items) => ({ ...items, [id]: layout }))
+  const updatePanel = (id: PanelId, layout: PanelLayout) => {
+    if (id === 'tags' && !layout.open) setRecentTagId(null)
+    setPanelLayouts((items) => ({ ...items, [id]: layout }))
+  }
   const raisePanel = (id: PanelId) => setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], z: nextPanelZ(items) } }))
-  const togglePanel = (id: PanelId) => setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], open: !items[id].open, z: nextPanelZ(items) } }))
+  const togglePanel = (id: PanelId) => {
+    if (id === 'tags' && panelLayouts.tags.open) setRecentTagId(null)
+    setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], open: !items[id].open, z: nextPanelZ(items) } }))
+  }
   const updatePanelOrder = useCallback((next: PanelId[]) => setPanelOrder((current) => current.length === next.length && current.every((id, index) => id === next[index]) ? current : next), [])
   const toggleAnnotationMode = () => {
     setAnnotationMode((active) => {
       if (!active) {
         setAreaSelectionEnabled(false)
+        setTagMode(false)
         window.getSelection()?.removeAllRanges()
       }
       return !active
     })
+  }
+  const toggleTagMode = () => {
+    const next = !tagMode
+    if (next) {
+      setAreaSelectionEnabled(false); setAnnotationMode(false); window.getSelection()?.removeAllRanges()
+    }
+    setTagMode(next)
   }
   const panelPosition = (id: PanelId) => {
     const index = panelOrder.indexOf(id)
     return index < 0 ? Number.MAX_SAFE_INTEGER : index
   }
   const visiblePanelIds = (Object.keys(panelLayouts) as PanelId[])
-    .filter((id) => panelLayouts[id].open && (id === 'projects' || Boolean(source)))
+    .filter((id) => panelLayouts[id].open && (id === 'projects' || ((id === 'notes' || id === 'tags') && Boolean(activeProjectId)) || Boolean(source)))
     .sort((first, second) => panelPosition(first) - panelPosition(second))
   const leftPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'left')
   const rightPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'right')
@@ -1270,14 +1327,14 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   })
 
   const openProjectNotes = (areaId: string) => {
-    openWorkArea(areaId)
+    void openProject(areaId)
     setPanelLayouts((items) => ({ ...items, notes: { ...items.notes, open: true, z: nextPanelZ(items) } }))
   }
   const toggleProjectConversations = (areaId: string) => {
-    if (areaId !== activeWorkAreaId) openWorkArea(areaId)
+    if (areaId !== activeProjectId) void openProject(areaId)
     setCollapsedProjectIds((items) => {
       const next = new Set(items)
-      if (areaId === activeWorkAreaId && !next.has(areaId)) next.add(areaId)
+      if (areaId === activeProjectId && !next.has(areaId)) next.add(areaId)
       else next.delete(areaId)
       return next
     })
@@ -1286,19 +1343,58 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     openConversation(conversationId)
     setPanelLayouts((items) => ({ ...items, chat: { ...items.chat, open: true, z: nextPanelZ(items) } }))
   }
+  const currentProject = projects.find((project) => project.id === activeProjectId)
+  const confirmDeleteProject = (projectId: string) => {
+    if (window.confirm('删除项目将永久删除其中全部文件、对话、笔记、标签、批注、高亮、资源和索引。继续吗？')) void deleteProject(projectId)
+  }
+  const deleteProjectFile = async (projectId: string, fileId: string) => {
+    const base = snapshotCurrent()?.id === projectId ? snapshotCurrent() : projects.find((project) => project.id === projectId)
+    if (!base || !window.confirm('删除文件将永久删除该文件的阅读位置、高亮、批注、文件笔记、标签、资源和索引。继续吗？')) return
+    const removed = base.files.find((file) => file.id === fileId)
+    if (removed?.source?.url) URL.revokeObjectURL(removed.source.url)
+    const files = base.files.filter((file) => file.id !== fileId)
+    const next: RuntimeProject = { ...base, files, tags: tagsWithoutFile(base.tags, fileId), activeFileId: base.activeFileId === fileId ? files[0]?.id || null : base.activeFileId, updatedAt: Date.now() }
+    await projectRepository.deleteFile(projectId, fileId)
+    await projectRepository.save(next)
+    setProjects((items) => items.map((project) => project.id === projectId ? next : project))
+    if (projectId === activeProjectId && fileId === activeFileId) {
+      if (next.activeFileId) {
+        const hydrated = await hydrateProjectFile(next, next.activeFileId)
+        setProjects((items) => items.map((project) => project.id === projectId ? hydrated.project : project))
+        loadProjectFile(hydrated.project, hydrated.file)
+      } else loadProjectFile(next, null)
+    }
+    setProjectMemories(await projectRepository.list())
+  }
+  const deleteTag = (id: string) => {
+    if (id === recentTagId) setRecentTagId(null)
+    setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: project.tags.filter((tag) => tag.id !== id), updatedAt: Date.now() } : project))
+  }
+  const renameTag = (id: string, label: string) => {
+    if (id === recentTagId) setRecentTagId(null)
+    setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: project.tags.map((tag) => tag.id === id ? { ...tag, label } : tag), updatedAt: Date.now() } : project))
+  }
+  const moveTag = (id: string, region: NormalizedRegion) => setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: project.tags.map((tag) => tag.id === id ? { ...tag, region } : tag), updatedAt: Date.now() } : project))
   const projectContent = <ProjectExplorer
-    projects={workAreas.map((area) => ({ id: area.id, name: area.source.name, busy: Array.from(aiTasks).some((key) => key.startsWith(`${area.id}:`)) }))}
-    activeProjectId={activeWorkAreaId}
+    projects={projects.map((project) => ({ id: project.id, name: project.name, busy: Array.from(aiTasks).some((key) => key.startsWith(`${project.id}:`)), files: project.files.map((file) => ({ id: file.id, name: file.name, indexStatus: file.indexState.status })) }))}
+    activeProjectId={activeProjectId}
+    activeFileId={activeFileId}
     activeConversationId={activeConversationId}
     conversations={conversations}
     collapsedProjectIds={collapsedProjectIds}
-    onOpenProject={openWorkArea}
+    onCreateProject={createEmptyProject}
+    onOpenProject={openProject}
+    onAddFile={(projectId, file) => openFile(file, projectId)}
+    onOpenFile={(projectId, fileId) => void openProjectFile(projectId, fileId)}
+    onDeleteFile={(projectId, fileId) => void deleteProjectFile(projectId, fileId)}
+    onDeleteProject={confirmDeleteProject}
     onCreateConversation={createConversationForArea}
     onOpenNotes={openProjectNotes}
     onToggleProject={toggleProjectConversations}
     onOpenConversation={openProjectConversation}
     onDeleteConversation={deleteConversation}
   />
+  const tagContent = <TagPanel tags={currentProject?.tags || []} files={currentProject?.files || []} tagMode={tagMode} recentTagId={recentTagId} canGoBack={navigationDepth > 0} onToggleTagMode={toggleTagMode} onBack={() => void navigateBack()} onOpen={openTag} onRename={renameTag} onDelete={deleteTag} />
 
   const selectionHasImages = selections.some((selection) => selection.images.length > 0)
   const selectionContent = <div className="selection-panel-body single" ref={selectionBodyRef}><section className="selection-content-section">
@@ -1308,7 +1404,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const chatContent = <div className="chat-panel-layout">
     <section className="ai-fixed-controls">
-      <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button></div>
+      <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button><button className={scope === 'project' ? 'active' : ''} onClick={() => setScope('project')}>对项目</button></div>
       <div className="action-grid"><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
     </section>
     <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode)} onScroll={(event) => trackChatPosition(event.currentTarget)}>
@@ -1317,20 +1413,29 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div>
           : <article className="answer-card" key={message.id}>
               <div className="answer-actions"><CopyMessageButton content={message.content} copyLabel={t('copy')} /><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div>
-              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform} components={{ a: ({ href, children }) => href?.startsWith('#raid-citation-page-') ? <span className="citation-page-label">{children}</span> : <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{normalizeAssistantMarkdown(message.content, message.citationsDisabled, message.references, documentText)}</ReactMarkdown></div>
+              <div className="markdown" onClick={(event) => {
+                const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#raid-reference-"]')
+                if (!link) return
+                const number = referenceNumberFromHref(link.getAttribute('href'))
+                const reference = message.references?.find((item) => item.number === number)
+                if (!reference) return
+                event.preventDefault(); openReference(reference)
+              }}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform}>{normalizeAssistantMarkdown(message.content, message.references)}</ReactMarkdown></div>
             </article>)}
         {currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}
         <div ref={resultsEndRef} />
       </section>
       {error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}
     </div>
-    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
+    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'project' ? '针对整个项目提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
-  const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, notes: source ? <NoteEditor fileName={source.name} value={note} onChange={setNote} assets={noteAssets} onAssetsChange={setNoteAssets} /> : null }
+  const notesContent = activeProjectId ? <NoteEditor fileName={currentProject?.name || '项目'} value={note} onChange={setNote} assets={noteAssets} onAssetsChange={setNoteAssets} /> : null
+  const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, notes: notesContent, tags: tagContent }
   const panelMeta: Record<PanelId, { title: string; icon: ReactNode; actions?: ReactNode }> = {
     projects: { title: '项目', icon: <FolderOpen size={15} /> }, selection: { title: t('selection'), icon: <MousePointer2 size={15} /> },
     chat: { title: t('aiAssistant'), icon: <BrainCircuit size={16} />, actions: <button onClick={createConversation} title={t('newConversation')}><Plus size={14} /></button> }, notes: { title: '笔记', icon: <StickyNote size={15} /> },
+    tags: { title: '标签', icon: <Tag size={15} /> },
   }
   const renderPanel = (id: PanelId) => <WorkspacePanel key={id} id={id} title={panelMeta[id].title} icon={panelMeta[id].icon} actions={panelMeta[id].actions} layout={panelLayouts[id]} onChange={(layout) => updatePanel(id, layout)} onFocus={() => raisePanel(id)}>{panelContent[id]}</WorkspacePanel>
   const renderDockPanels = (ids: PanelId[]) => ids.map((id, index) => <Fragment key={id}>{renderPanel(id)}{index < ids.length - 1 && <div className="dock-splitter" onPointerDown={(event) => startDockSplitResize(id, ids[index + 1], event)} />}</Fragment>)
@@ -1340,7 +1445,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       {fileDragActive && <div className="file-drop-overlay"><div><FolderOpen size={32} /><strong>{t('dropToOpen')}</strong><small>{t('dropToOpenHelp')}</small></div></div>}
       {busy === 'convert' && <div className="conversion-overlay"><LoaderCircle className="spin" size={24} /><strong>{progress || t('convertingDocument')}</strong></div>}
       <ActivityBar
-        openPanels={{ projects: panelLayouts.projects.open, selection: panelLayouts.selection.open, notes: panelLayouts.notes.open, chat: panelLayouts.chat.open }}
+        openPanels={{ projects: panelLayouts.projects.open, selection: panelLayouts.selection.open, notes: panelLayouts.notes.open, tags: panelLayouts.tags.open, chat: panelLayouts.chat.open }}
         hasSource={Boolean(source)}
         dark={dark}
         annotationActive={annotationMode}
@@ -1379,12 +1484,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
                 <div className="zoom-control"><button onClick={() => setZoom((z) => Math.max(0.25, z - 0.1))}><Minus size={15} /></button><input aria-label="缩放倍率" type="text" inputMode="numeric" value={zoomInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setZoomInput(event.target.value.replace(/\D/g, ''))} onBlur={commitZoomInput} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setZoomInput(String(Math.round(zoom * 100))); event.currentTarget.blur() } }} /><span>%</span><button onClick={() => setZoom((z) => Math.min(5, z + 0.1))}><Plus size={15} /></button></div>
               </div>
             </div>
-            <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={setAnnotations} /></div>
+            <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><Suspense fallback={<div className="viewer-state"><span className="spinner" /><p>{t('loadingPdf')}</p></div>}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} tagMode={tagMode} tags={(currentProject?.tags || []).filter((tag) => tag.fileId === activeFileId)} onCreateTag={addTagAt} onMoveTag={moveTag} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={setAnnotations} /></Suspense></div>
           </>}</section>
         {rightPanelIds.length > 0 && <div className="dock-column dock-column-right"><div className="panel-resizer left" onPointerDown={(event) => startResize('right', rightDockWidth, event)} />{renderDockPanels(rightPanelIds)}</div>}
         {floatingPanelIds.map(renderPanel)}
         </main>
-      {settingsOpen && <AiSettingsModal
+      {settingsOpen && <Suspense fallback={null}><AiSettingsModal
           value={aiConfig}
           serverConfigured={Boolean(configured)}
           skills={skills}
@@ -1406,7 +1511,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
             if (!config.reasoningEnabled) setDeepThinking(false)
             localStorage.setItem('reading-assistant-ai-config', JSON.stringify(config))
           }}
-        />}
+        /></Suspense>}
     </div>
   )
 }

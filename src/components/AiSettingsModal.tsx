@@ -2,8 +2,7 @@ import { Bot, BrainCircuit, CheckCircle2, CircleHelp, Database, Eye, EyeOff, Fol
 import { useEffect, useRef, useState } from 'react'
 import type { LanguagePack } from '../i18n'
 import { useI18n, type AppLanguage } from '../i18n'
-import type { AiConfig, ImportedSkill, MemorySettings } from '../types'
-import type { FileMemorySummary } from '../lib/memory'
+import type { AiConfig, ImportedSkill, MemorySettings, ProjectSummary } from '../types'
 
 type SettingsTab = 'models' | 'skills' | 'memory' | 'language'
 
@@ -15,7 +14,7 @@ type Props = {
   languages: LanguagePack[]
   memorySettings: MemorySettings
   userMemory: string
-  projects: FileMemorySummary[]
+  projects: ProjectSummary[]
   onClose: () => void
   onSave: (config: AiConfig) => void
   onImportSkill: () => Promise<boolean>
@@ -228,7 +227,7 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
         </section>}
 
         {tab === 'memory' && <section className="memory-settings">
-          <section className="project-memory-list"><div className="memory-section-heading"><span>{pack.code === 'en-US' ? 'Project memory' : '项目记忆'} · {projects.length}</span></div><div className="memory-file-list">{projects.map((project) => <article key={project.id}><Database size={15} /><div><strong>{project.fileName}</strong><small>{project.conversationCount} {t('memoryConversations')} · {new Date(project.updatedAt).toLocaleString()}</small></div><button onClick={() => { if (window.confirm(pack.code === 'en-US' ? 'Deleting this project also permanently deletes all related conversations, notes, note images, highlights, and annotations. Continue?' : '删除项目将同时永久删除全部相关对话、未导出笔记、笔记墨迹图片、高亮与批注。是否继续？')) void onDeleteProject(project.id) }}><Trash2 size={14} /></button></article>)}</div></section>
+          <section className="project-memory-list"><div className="memory-section-heading"><span>{pack.code === 'en-US' ? 'Projects' : '项目数据'} · {projects.length}</span></div><div className="memory-file-list">{projects.map((project) => <article key={project.id}><Database size={15} /><div><strong>{project.name}</strong><small>{project.fileCount} 个文件 · {project.conversationCount} {t('memoryConversations')} · {new Date(project.updatedAt).toLocaleString()}</small></div><button onClick={() => { if (window.confirm(pack.code === 'en-US' ? 'Permanently delete this project and every related file, note, tag, annotation and index?' : '永久删除该项目以及全部文件、笔记、标签、批注和索引？')) void onDeleteProject(project.id) }}><Trash2 size={14} /></button></article>)}</div></section>
           <section className="memory-card">
             <label className="vision-toggle"><input type="checkbox" checked={memorySettings.userMemoryEnabled} onChange={(event) => onMemorySettingsChange({ ...memorySettings, userMemoryEnabled: event.target.checked })} /><span className="vision-switch" aria-hidden="true" /><span><strong>{t('userMemory')}</strong><small>{t('userMemoryHelp')}</small></span></label>
             <textarea className="user-memory-editor" value={userMemory} onChange={(event) => onUserMemoryChange(event.target.value)} placeholder={t('userMemoryPlaceholder')} />

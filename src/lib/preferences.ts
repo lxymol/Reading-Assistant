@@ -41,6 +41,7 @@ const defaultPanels: Record<PanelId, PanelLayout> = {
   selection: { open: false, dock: 'left', x: 130, y: 90, width: 340, height: 560, dockSize: 1, z: 41 },
   chat: { open: false, dock: 'left', x: 720, y: 65, width: 420, height: 720, dockSize: 1, z: 42 },
   notes: { open: false, dock: 'left', x: 640, y: 100, width: 430, height: 650, dockSize: 1, z: 43 },
+  tags: { open: false, dock: 'left', x: 180, y: 110, width: 330, height: 560, dockSize: 1, z: 44 },
 }
 
 export const loadPanelLayouts = (): Record<PanelId, PanelLayout> => {

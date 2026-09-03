@@ -7,6 +7,7 @@ type Rect = { left: number; top: number; width: number; height: number }
 type Props = {
   pageNumber: number
   className?: string
+  initialSize?: { width: number; height: number }
   render: (canvas: HTMLCanvasElement) => Promise<void>
   onSelect: (selection: SelectionResult) => void
   selectionEnabled?: boolean
@@ -14,7 +15,7 @@ type Props = {
   overlay?: ReactNode
 }
 
-export default function SelectableCanvas({ pageNumber, className = '', render, onSelect, selectionEnabled = true, inverted = false, overlay }: Props) {
+export default function SelectableCanvas({ pageNumber, className = '', initialSize, render, onSelect, selectionEnabled = true, inverted = false, overlay }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const hasContentRef = useRef(false)
   const startRef = useRef<Point | null>(null)
@@ -127,6 +128,7 @@ export default function SelectableCanvas({ pageNumber, className = '', render, o
     <div
       className={`selectable-page ${selectionEnabled ? 'selection-enabled' : ''} ${inverted ? 'file-inverted' : ''} ${className}`}
       data-page-number={pageNumber}
+      style={rendering && initialSize ? { width: initialSize.width, height: initialSize.height } : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

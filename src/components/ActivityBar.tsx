@@ -1,10 +1,10 @@
-import { BookOpen, BrainCircuit, FolderOpen, Moon, MousePointer2, PencilRuler, Plus, Settings2, StickyNote, Sun } from 'lucide-react'
+import { BookOpen, BrainCircuit, FolderOpen, Moon, MousePointer2, PencilRuler, Plus, Settings2, StickyNote, Sun, Tag } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import type { PanelId } from '../types'
 
-type ActivityId = 'projects' | 'selection' | 'notes' | 'chat' | 'annotation' | 'open'
+type ActivityId = 'projects' | 'selection' | 'notes' | 'tags' | 'chat' | 'annotation' | 'open'
 type DragState = { id: ActivityId; pointerId: number; origin: number; target: number; startY: number; deltaY: number; moved: boolean }
-const defaultOrder: ActivityId[] = ['projects', 'selection', 'notes', 'chat', 'annotation', 'open']
+const defaultOrder: ActivityId[] = ['projects', 'selection', 'notes', 'tags', 'chat', 'annotation', 'open']
 const orderStorageKey = 'reading-assistant-activity-order'
 const activityStep = 47
 
@@ -37,7 +37,7 @@ export default function ActivityBar({ openPanels, hasSource, dark, annotationAct
   const suppressClickRef = useRef(false)
 
   useEffect(() => {
-    onPanelOrderChange(order.filter((id): id is PanelId => ['projects', 'selection', 'notes', 'chat'].includes(id)))
+    onPanelOrderChange(order.filter((id): id is PanelId => ['projects', 'selection', 'notes', 'tags', 'chat'].includes(id)))
   }, [order, onPanelOrderChange])
 
   const updateDrag = (next: DragState | null) => { dragRef.current = next; setDrag(next) }
@@ -86,6 +86,7 @@ export default function ActivityBar({ openPanels, hasSource, dark, annotationAct
     projects: <button className={openPanels.projects ? 'active' : ''} onClick={() => onTogglePanel('projects')} title="项目"><FolderOpen /></button>,
     selection: <button className={openPanels.selection ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('selection')} title={labels.selection}><MousePointer2 /></button>,
     notes: <button className={openPanels.notes ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('notes')} title="笔记"><StickyNote /></button>,
+    tags: <button className={openPanels.tags ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('tags')} title="标签"><Tag /></button>,
     chat: <button className={openPanels.chat ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('chat')} title={labels.conversations}><BrainCircuit /></button>,
     annotation: <button className={annotationActive ? 'active' : ''} disabled={!hasSource} onClick={onToggleAnnotation} title="批注"><PencilRuler /></button>,
     open: <label title={labels.openFile}><Plus /><input hidden type="file" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) onOpenFile(file) }} /></label>,
