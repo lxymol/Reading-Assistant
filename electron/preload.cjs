@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('readingAssistant', {
   openExternal: (url) => ipcRenderer.invoke('reading-assistant:open-external', url),
   getQuickOpenEnabled: () => ipcRenderer.invoke('reading-assistant:get-quick-open-enabled'),
   setQuickOpenEnabled: (enabled) => ipcRenderer.invoke('reading-assistant:set-quick-open-enabled', enabled),
+  checkForUpdates: (force = false) => ipcRenderer.invoke('reading-assistant:check-for-updates', force),
   takePendingOpenFiles: () => ipcRenderer.invoke('reading-assistant:take-pending-open-files'),
   onOpenFile: (listener) => {
     const wrapped = (_event, file) => listener(file)

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, session, shell } from 'electron'
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -67,6 +67,40 @@ const internalPort = isDevelopmentInstance ? 18788 : 18787
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 const contextMenuKey = 'HKCU\\Software\\Classes\\*\\shell\\Raid'
 const pendingOpenPaths = []
+const repositoryUrl = 'https://github.com/lxymol/Reading-Assistant'
+const latestReleaseApiUrl = 'https://api.github.com/repos/lxymol/Reading-Assistant/releases/latest'
+let updateCheckCache = null
+
+function compareVersions(left, right) {
+  const parts = (value) => String(value || '').trim().replace(/^v/i, '').split(/[+-]/, 1)[0].split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const leftParts = parts(left)
+  const rightParts = parts(right)
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const difference = (leftParts[index] || 0) - (rightParts[index] || 0)
+    if (difference) return Math.sign(difference)
+  }
+  return 0
+}
+
+async function checkForUpdates(force = false) {
+  const currentVersion = app.getVersion()
+  const base = { currentVersion, author: 'xyLee', repositoryUrl }
+  if (!force && updateCheckCache && Date.now() - updateCheckCache.checkedAt < 15 * 60 * 1000) return updateCheckCache
+  try {
+    const response = await net.fetch(latestReleaseApiUrl, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `Raid/${currentVersion}` },
+    })
+    if (!response.ok) throw new Error(`GitHub ${response.status}`)
+    const release = await response.json()
+    const latestVersion = String(release?.tag_name || '').trim().replace(/^v/i, '')
+    if (!/^\d+(?:\.\d+){1,3}(?:[-+][\w.-]+)?$/.test(latestVersion)) throw new Error('Invalid release version')
+    const releaseUrl = typeof release?.html_url === 'string' && release.html_url.startsWith(`${repositoryUrl}/releases/`) ? release.html_url : `${repositoryUrl}/releases/latest`
+    updateCheckCache = { ...base, latestVersion, releaseUrl, updateAvailable: compareVersions(latestVersion, currentVersion) > 0, checkedAt: Date.now() }
+  } catch {
+    updateCheckCache = { ...base, releaseUrl: `${repositoryUrl}/releases/latest`, updateAvailable: false, checkedAt: Date.now(), error: 'UPDATE_CHECK_FAILED' }
+  }
+  return updateCheckCache
+}
 
 function candidateOpenPaths(argv) {
   return argv.filter((value) => typeof value === 'string' && !value.startsWith('-')).map((value) => path.resolve(value)).filter((value) => fs.existsSync(value) && fs.statSync(value).isFile())
@@ -394,6 +428,7 @@ ipcMain.handle('reading-assistant:open-external', async (_event, value) => {
 })
 ipcMain.handle('reading-assistant:get-quick-open-enabled', () => quickOpenEnabled())
 ipcMain.handle('reading-assistant:set-quick-open-enabled', (_event, enabled) => setQuickOpenEnabled(Boolean(enabled)))
+ipcMain.handle('reading-assistant:check-for-updates', (_event, force) => checkForUpdates(Boolean(force)))
 ipcMain.handle('reading-assistant:take-pending-open-files', () => pendingOpenPaths.splice(0).flatMap((filePath) => { try { return [openFilePayload(filePath)] } catch { return [] } }))
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)

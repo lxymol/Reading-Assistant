@@ -1,8 +1,8 @@
-import { Bot, CheckCircle2, CircleHelp, Eye, EyeOff, FolderOpen, Languages, LoaderCircle, Puzzle, Settings2, SlidersHorizontal, Trash2, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { Bot, CheckCircle2, CircleHelp, Download, ExternalLink, Eye, EyeOff, FolderOpen, GitFork, Languages, LoaderCircle, Puzzle, RefreshCw, Settings2, SlidersHorizontal, Trash2, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LanguagePack } from '../i18n'
 import { useI18n, type AppLanguage } from '../i18n'
-import type { AiConfig, ImportedSkill, MemorySettings } from '../types'
+import type { AiConfig, AppUpdateInfo, ImportedSkill, MemorySettings } from '../types'
 
 type SettingsTab = 'models' | 'advanced' | 'general'
 
@@ -41,7 +41,27 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
   const [message, setMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null)
   const [codexStatus, setCodexStatus] = useState<{ loading: boolean; installed?: boolean; loggedIn?: boolean; accountType?: string; email?: string; planType?: string; error?: string }>({ loading: false })
   const [startingCodexLogin, setStartingCodexLogin] = useState(false)
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const loginPollRef = useRef<number | null>(null)
+  const updateRequestedRef = useRef(false)
+
+  const checkForUpdates = useCallback(async (force = false) => {
+    setCheckingUpdate(true)
+    try {
+      if (!window.readingAssistant?.checkForUpdates) throw new Error('Desktop update check unavailable')
+      setUpdateInfo(await window.readingAssistant.checkForUpdates(force))
+    } catch {
+      setUpdateInfo({ currentVersion: '2.0.0', author: 'xyLee', repositoryUrl: 'https://github.com/lxymol/Reading-Assistant', releaseUrl: 'https://github.com/lxymol/Reading-Assistant/releases/latest', updateAvailable: false, checkedAt: Date.now(), error: 'UPDATE_CHECK_FAILED' })
+    } finally {
+      setCheckingUpdate(false)
+    }
+  }, [])
+
+  const openExternal = (url: string) => {
+    if (window.readingAssistant?.openExternal) void window.readingAssistant.openExternal(url)
+    else window.open(url, '_blank', 'noopener,noreferrer')
+  }
 
   const refreshCodexStatus = async () => {
     setCodexStatus({ loading: true })
@@ -98,6 +118,12 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
   }, [draft.provider])
 
   useEffect(() => () => stopLoginPolling(), [])
+
+  useEffect(() => {
+    if (tab !== 'general' || updateRequestedRef.current) return
+    updateRequestedRef.current = true
+    void checkForUpdates()
+  }, [tab, checkForUpdates])
 
   const fetchModels = async (mode: 'default' | 'vision' | 'reasoning') => {
     if (modelMenu === mode && availableModels[mode].length) return setModelMenu(null)
@@ -235,7 +261,14 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
 
         {tab === 'general' && <div className="general-settings"><section className="import-settings"><div className="import-header"><div><h3>{t('languageSettings')}</h3><p>{t('languageImportHelp')}</p></div><button className="import-button" disabled={importing} onClick={() => runImport('language')}>{importing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{t('importLanguage')}</button></div>
           <div className="language-list">{languages.map((item) => <button key={item.code} className={language === item.code ? 'active' : ''} onClick={() => onLanguageChange(item.code)}><span>{item.label}</span><small>{item.code}</small>{language === item.code && <CheckCircle2 size={16} />}</button>)}</div>
-        </section><section className="memory-card quick-open-card"><label className="vision-toggle"><input type="checkbox" checked={quickOpenEnabled} disabled={!window.readingAssistant} onChange={(event) => void onQuickOpenChange(event.target.checked)} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Open with Raid' : '右键使用 Raid 打开'}</strong><small>{pack.code === 'en-US' ? 'Adds an “Open with Raid” item to the Windows file context menu.' : '在 Windows 文件右键菜单中添加“使用 Raid 打开”。卸载时会自动清理。'}</small></span></label></section></div>}
+        </section><section className="memory-card quick-open-card"><label className="vision-toggle"><input type="checkbox" checked={quickOpenEnabled} disabled={!window.readingAssistant} onChange={(event) => void onQuickOpenChange(event.target.checked)} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Open with Raid' : '右键使用 Raid 打开'}</strong><small>{pack.code === 'en-US' ? 'Adds an “Open with Raid” item to the Windows file context menu.' : '在 Windows 文件右键菜单中添加“使用 Raid 打开”。卸载时会自动清理。'}</small></span></label></section>
+          <section className="memory-card app-info-card">
+            <div className="app-info-heading"><h3>{pack.code === 'en-US' ? 'Raid updates' : 'Raid更新'}</h3><button className="update-refresh" type="button" disabled={checkingUpdate} onClick={() => void checkForUpdates(true)} title={pack.code === 'en-US' ? 'Check again' : '重新检查'}>{checkingUpdate ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}</button></div>
+            <div className="version-grid"><span>{pack.code === 'en-US' ? 'Current version' : '当前版本'}</span><strong>{updateInfo ? `v${updateInfo.currentVersion}` : '—'}</strong><span>{pack.code === 'en-US' ? 'Latest version' : '最新版本'}</span><strong>{checkingUpdate && !updateInfo ? (pack.code === 'en-US' ? 'Checking…' : '检查中…') : updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : (pack.code === 'en-US' ? 'Unavailable' : '暂时无法获取')}</strong></div>
+            {updateInfo?.updateAvailable && <div className="update-status available">{pack.code === 'en-US' ? 'A new version is available' : '发现新版本'}</div>}
+            {updateInfo?.error && <div className="update-status failed">{pack.code === 'en-US' ? 'Could not check GitHub. You can still open the releases page.' : '暂时无法连接 GitHub，仍可直接打开发布页面。'}</div>}
+            <div className="app-info-actions"><button type="button" onClick={() => openExternal(updateInfo?.repositoryUrl || 'https://github.com/lxymol/Reading-Assistant')}><GitFork size={14} />{pack.code === 'en-US' ? 'Repository' : '项目仓库'}<ExternalLink size={11} /></button><button type="button" className={updateInfo?.updateAvailable ? 'primary' : ''} onClick={() => openExternal(updateInfo?.releaseUrl || 'https://github.com/lxymol/Reading-Assistant/releases/latest')}>{updateInfo?.updateAvailable ? <Download size={14} /> : <ExternalLink size={14} />}{updateInfo?.updateAvailable ? (pack.code === 'en-US' ? 'Download update' : '下载更新') : (pack.code === 'en-US' ? 'Releases' : '发布页面')}</button><small className="app-author">by xyLee</small></div>
+          </section></div>}
 
         {message && <div className={`settings-message ${message.type}`}>{message.type === 'ok' ? <CheckCircle2 size={15} /> : <X size={15} />}<span>{message.text}</span></div>}
       </div>

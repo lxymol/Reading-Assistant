@@ -38,6 +38,7 @@ export type AnnotationTool = 'text' | 'ink' | 'eraser'
 
 export type FolderImportResult = { canceled?: boolean; folderPath?: string; files?: Array<{ path: string; content: string }>; error?: string }
 export type DocumentConversionResult = { name?: string; type?: string; data?: Uint8Array; error?: string }
+export type AppUpdateInfo = { currentVersion: string; latestVersion?: string; author: string; repositoryUrl: string; releaseUrl: string; updateAvailable: boolean; checkedAt: number; error?: string }
 export type AiAction = 'translate' | 'explain' | 'insight' | 'summarize' | 'custom'
 export type CapturedSelection = SelectionResult & { id: string; text: string; textParts: string[]; loading: boolean }
 export type Conversation = {
@@ -96,6 +97,7 @@ declare global {
       setDockZones: (visible: boolean, active: 'left' | 'right' | null, dark?: boolean) => void
       getQuickOpenEnabled: () => Promise<boolean>
       setQuickOpenEnabled: (enabled: boolean) => Promise<boolean>
+      checkForUpdates: (force?: boolean) => Promise<AppUpdateInfo>
       takePendingOpenFiles: () => Promise<Array<{ name: string; type: string; lastModified: number; data: Uint8Array }>>
       onOpenFile: (listener: (file: { name: string; type: string; lastModified: number; data: Uint8Array }) => void) => () => void
     }
