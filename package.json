@@ -15,11 +15,12 @@
     "node": ">=20"
   },
   "private": true,
-  "version": "1.4.0",
+  "version": "2.0.0",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
     "test": "node scripts/run-tests.mjs",
+    "generate:icons": "node scripts/generate-icons.mjs",
     "dev": "concurrently -k \"vite\" \"node --watch server/index.mjs\"",
     "build": "tsc -b && vite build",
     "preview": "node server/index.mjs",
@@ -35,7 +36,7 @@
     "asar": true,
     "electronDist": "node_modules/electron/dist",
     "directories": {
-      "output": "release-1.4.0"
+      "output": "release-2.0.0"
     },
     "files": [
       "dist/**/*",
@@ -57,7 +58,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "deleteAppDataOnUninstall": true
+      "deleteAppDataOnUninstall": true,
+      "include": "electron/installer.nsh"
     }
   },
   "dependencies": {
@@ -65,6 +67,7 @@
     "express": "latest"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^1.0.0",
     "@eslint/js": "latest",
     "@types/express": "latest",
     "@types/node": "latest",

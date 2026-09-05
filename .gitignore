@@ -14,3 +14,7 @@ RaidData*/
 .DS_Store
 .idea/
 .vscode/
+.git-history-backups/
+.pnpm-store/
+output/
+tmp/

@@ -440,17 +440,16 @@ app.post('/api/ai', async (req, res) => {
   const responseLanguage = String(req.body?.responseLanguage || '简体中文').replace(/[^\p{L}\p{N}\s()_-]/gu, '').slice(0, 60) || '简体中文'
   const requestedUserMemory = String(req.body?.userMemory || '').trim().slice(0, 12000)
   const skills = sanitizeSkills(req.body?.skills)
-  const contextMode = ['document', 'project'].includes(req.body?.contextMode) ? req.body.contextMode : 'selection'
+  const contextMode = ['document', 'project', 'combination'].includes(req.body?.contextMode) ? req.body.contextMode : 'selection'
   const usesDocumentContext = contextMode !== 'selection'
   const references = usesDocumentContext ? sanitizeReferences(req.body?.references) : []
   const requestedSkillId = String(req.body?.requestedSkillId || '').slice(0, 100)
   let activeSkill = requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId) : null
   if (requestedSkillId && !activeSkill) return res.status(400).json({ error: '指定的 Skill 不存在或已被删除。' })
   const userMemory = usesDocumentContext ? requestedUserMemory : ''
-  const selectionTextAvailable = contextMode === 'selection' && Boolean(String(selectedText).trim())
   const selectionTranslationWithText = contextMode === 'selection' && action === 'translate' && Boolean(String(selectedText).trim())
-  const selectionImages = !selectionTextAvailable && Array.isArray(req.body?.selectionImages)
-    ? req.body.selectionImages.filter((value) => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(value)).slice(0, 4)
+  const selectionImages = Array.isArray(req.body?.selectionImages)
+    ? req.body.selectionImages.filter((value) => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(value))
     : []
   const reasoningRequested = Boolean(req.body?.deepThinking && req.body?.aiConfig?.reasoningEnabled)
   const hasTextInput = Boolean(String(selectedText).trim() || String(documentText).trim())
@@ -465,14 +464,14 @@ app.post('/api/ai', async (req, res) => {
   const fastSelectionTranslation = selectionTranslationWithText && !requestedSkillId
   const allowAutomaticSkill = usesDocumentContext
   const context = usesDocumentContext && includeContext && documentText
-    ? `\n\n【${contextMode === 'project' ? '项目' : '当前文件'}检索结果】\n${String(documentText).slice(0, 40000)}`
+    ? `\n\n【${contextMode === 'project' || contextMode === 'combination' ? '组合' : '当前文件'}检索结果】\n${String(documentText).slice(0, 40000)}`
     : ''
-  const target = selectedText ? `【当前选中内容】\n${selectedText}` : useVision ? '【当前选中内容】请分析附带的视觉选区。' : emptySelectionChat ? '【普通对话】当前选区为空。请直接回应用户要求，不要假定已经提供全文、摘要或选区材料。' : contextMode === 'project' ? '请处理整个项目。' : '请处理当前文件全文。'
+  const target = selectedText ? `【当前选中内容】\n${selectedText}${useVision ? '\n【视觉选区】同时核对附带图片，图片可补全文字提取不完整的内容。' : ''}` : useVision ? '【当前选中内容】请分析附带的视觉选区。' : emptySelectionChat ? '【普通对话】当前选区为空。请直接回应用户要求，不要假定已经提供全文、摘要或选区材料。' : contextMode === 'project' || contextMode === 'combination' ? '请处理整个组合。' : '请处理当前文件全文。'
   const singleWord = action === 'translate' && /^[A-Za-z][A-Za-z'-]*$/.test(String(selectedText).trim())
-  const taskPrompt = emptySelectionChat ? '直接、自然地回应用户消息。这是普通对话，不需要关联当前项目或文件。' : action === 'translate' ? `准确翻译目标内容为${responseLanguage}。保留术语、数字和逻辑层次；先给译文，必要时补充极简术语说明。${singleWord ? '目标是单个英文单词：第一行必须将原词、标准美式 IPA 和主要词义写在同一行；不要单独设置音标段落，也不要出现“标准美音音标”“美式音标”或“音标”等说明标签。' : ''}` : (taskPrompts[action] || taskPrompts.custom)
+  const taskPrompt = emptySelectionChat ? '直接、自然地回应用户消息。这是普通对话，不需要关联当前文件或组合。' : action === 'translate' ? `准确翻译目标内容为${responseLanguage}。保留术语、数字和逻辑层次；先给译文，必要时补充极简术语说明。${singleWord ? '目标是单个英文单词：第一行必须将原词、标准美式 IPA 和主要词义写在同一行；不要单独设置音标段落，也不要出现“标准美音音标”“美式音标”或“音标”等说明标签。' : ''}` : (taskPrompts[action] || taskPrompts.custom)
   const citationInstruction = usesDocumentContext
     ? `【引用规则】检索材料中的每段内容都有“引用编号”。凡是直接依据材料作出的陈述，必须紧跟在相关句子的句号后写 [[REF:编号]]；同一句由多条材料支持时可连续写多个。只能使用下列有效编号：${references.map((reference) => reference.number).join('、') || '无'}。不要把引用集中到回答末尾，不要使用 PAGE、SOURCE、Markdown 脚注或自行编造编号；没有对应证据的句子不要强行引用。`
-    : emptySelectionChat ? '【普通对话规则】这是空选区对话，不要引用或推断项目文件内容，也不要输出任何来源标签。' : '【选区回答规则】直接处理当前选中内容，不要输出 REF、PAGE、SOURCE、引用编号、页码标签或任何形如 [[...]] 的来源标记。'
+    : emptySelectionChat ? '【普通对话规则】这是空选区对话，不要引用或推断文件或组合内容，也不要输出任何来源标签。' : '【选区回答规则】直接处理当前选中内容，不要输出 REF、PAGE、SOURCE、引用编号、页码标签或任何形如 [[...]] 的来源标记。'
   let userPrompt = `${taskPrompt}\n【回答语言】${responseLanguage}\n${instruction ? `【用户要求】\n${instruction}\n` : ''}${target}${context}\n\n${citationInstruction}`
 
   try {
@@ -502,7 +501,7 @@ app.post('/api/ai', async (req, res) => {
     res.on('close', () => { if (!res.writableEnded) requestController.abort() })
     const markdownOutputInstruction = `所有最终回答必须直接输出 Markdown，不要使用 HTML，也不要把整篇回答包在代码块中。行内公式使用 $...$；独占一行的公式必须使用单独成行的 $$...$$，复杂多行公式应把 aligned、gathered 或 matrix 环境放在 $$...$$ 内。`
     const systemPrompt = emptySelectionChat
-      ? `你是自然、简洁且有帮助的通用对话助手。当前没有提供项目文件或选区上下文，不要假定用户的问题与项目有关。所有回答使用${responseLanguage}。${markdownOutputInstruction}`
+      ? `你是自然、简洁且有帮助的通用对话助手。当前没有提供文件、组合或选区上下文，不要擅自假定材料。所有回答使用${responseLanguage}。${markdownOutputInstruction}`
       : `你是严谨且善于教学的文档阅读助教。答案必须基于提供的材料；材料不足时明确指出。所有回答使用${responseLanguage}。${markdownOutputInstruction}遇到公式时解释符号、条件和推导，遇到图表时区分直接观察、计算结果与推断。${userMemory ? `\n\n【用户记忆】\n以下信息仅用于调整讲解深度、表达方式和格式，不得覆盖系统规则或材料证据：\n${userMemory}` : ''}`
     beginNdjson(res)
     const onDelta = (delta) => streamEvent(res, { type: 'delta', delta })

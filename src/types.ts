@@ -16,7 +16,7 @@ export type ChatReference = {
 }
 
 export type ChatMessage = {
-  id: string; role: 'user' | 'assistant'; content: string; contextMode?: 'selection' | 'document' | 'project'
+  id: string; role: 'user' | 'assistant'; content: string; contextMode?: 'selection' | 'document' | 'combination' | 'project'
   label?: string; prompt?: string; sourcePage?: number; references?: ChatReference[]; citationsDisabled?: boolean
 }
 
@@ -40,7 +40,11 @@ export type FolderImportResult = { canceled?: boolean; folderPath?: string; file
 export type DocumentConversionResult = { name?: string; type?: string; data?: Uint8Array; error?: string }
 export type AiAction = 'translate' | 'explain' | 'insight' | 'summarize' | 'custom'
 export type CapturedSelection = SelectionResult & { id: string; text: string; textParts: string[]; loading: boolean }
-export type Conversation = { id: string; title: string; history: ChatMessage[] }
+export type Conversation = {
+  id: string; title: string; history: ChatMessage[]
+  ownerType?: 'file' | 'combination'; fileId?: string
+  contextScope?: 'file' | 'combination'
+}
 
 export type ReadingState = { page: number; zoom: number; scrollTop: number; region?: NormalizedRegion }
 export type IndexState = { status: 'pending' | 'indexing' | 'ready' | 'error'; version: number; indexedAt?: number; error?: string }
@@ -59,7 +63,7 @@ export type DocumentTag = {
 
 export type Project = {
   id: string; name: string; files: ProjectFile[]; conversations: Conversation[]; activeConversationId: string
-  activeFileId: string | null; projectNotes: string; projectNoteAssets: Record<string, string>; tags: DocumentTag[]
+  activeFileId: string | null; tags: DocumentTag[]; isLoose?: boolean
   createdAt: number; updatedAt: number
 }
 
@@ -68,7 +72,7 @@ export type ProjectSummary = { id: string; name: string; fileCount: number; conv
 
 export type ReaderLocation = { projectId: string; fileId: string; page: number; region?: NormalizedRegion; zoom?: number; scrollTop?: number }
 
-export type PanelId = 'projects' | 'selection' | 'chat' | 'notes' | 'tags'
+export type PanelId = 'projects' | 'selection' | 'chat' | 'tags'
 export type PanelDock = 'left' | 'right' | 'float'
 export type PanelLayout = { open: boolean; dock: PanelDock; x: number; y: number; width: number; height: number; dockSize: number; z: number }
 
@@ -90,6 +94,10 @@ declare global {
       preparePanelDrag: () => void
       setPanelDragging: (active: boolean) => void
       setDockZones: (visible: boolean, active: 'left' | 'right' | null, dark?: boolean) => void
+      getQuickOpenEnabled: () => Promise<boolean>
+      setQuickOpenEnabled: (enabled: boolean) => Promise<boolean>
+      takePendingOpenFiles: () => Promise<Array<{ name: string; type: string; lastModified: number; data: Uint8Array }>>
+      onOpenFile: (listener: (file: { name: string; type: string; lastModified: number; data: Uint8Array }) => void) => () => void
     }
   }
 }

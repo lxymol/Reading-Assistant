@@ -16,7 +16,7 @@ const paragraph = (fileId: string, order: number, text: string): DocumentParagra
 
 const project: RuntimeProject = {
   id: 'project', name: 'Research', activeFileId: 'left', activeConversationId: '', conversations: [],
-  projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: 1, updatedAt: 1, hydrated: true,
+  tags: [], createdAt: 1, updatedAt: 1, hydrated: true,
   files: [
     { id: 'left', projectId: 'project', name: 'method.pdf', kind: 'pdf', type: 'application/pdf', size: 1, lastModified: 1, createdAt: 1, updatedAt: 1, readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], indexState: { status: 'ready', version: 1 }, paragraphs: [paragraph('left', 0, 'graph neural network message passing method'), paragraph('left', 1, 'training details and optimizer')] },
     { id: 'right', projectId: 'project', name: 'results.pdf', kind: 'pdf', type: 'application/pdf', size: 1, lastModified: 1, createdAt: 1, updatedAt: 1, readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], indexState: { status: 'ready', version: 1 }, paragraphs: [paragraph('right', 0, 'graph neural network improves benchmark accuracy'), paragraph('right', 1, 'ablation and limitations')] },

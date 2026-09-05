@@ -7,22 +7,20 @@ import remarkGfm from 'remark-gfm'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import {
-  BrainCircuit, Check, ChevronLeft, ChevronRight, Copy, FileText, Languages, FolderOpen,
+  BrainCircuit, Check, ChevronLeft, ChevronRight, Combine, Copy, FileText, Languages, FolderOpen,
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
-  Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, StickyNote, Square, Tag,
+  Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, Square, Tag,
 } from 'lucide-react'
 import ActivityBar from './components/ActivityBar'
-import NoteEditor from './components/NoteEditor'
 import ProjectExplorer from './components/ProjectExplorer'
 import TagPanel from './components/TagPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import type { DocumentReference } from './lib/pdf'
-import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, ChatReference, Conversation, DocumentAnnotation, DocumentHighlight, DocumentTag, ImportedSkill, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ProjectSummary, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
+import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, ChatReference, Conversation, DocumentAnnotation, DocumentHighlight, DocumentTag, ImportedSkill, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
 import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadSkills, loadUserMemory } from './lib/preferences'
 import { projectRepository } from './services/projectRepository'
-import { stableTextHash } from './services/layoutAnalyzer'
 import { retrievalService } from './services/retrievalService'
 import { createCitationContext, createReferences, validateReference } from './services/citationService'
 import { inlineCitationsToMarkdown, referenceNumberFromHref } from './services/inlineCitation'
@@ -33,9 +31,16 @@ import { createTag, tagsWithoutFile } from './services/tagStore'
 const DocumentViewer = lazy(() => import('./components/DocumentViewer'))
 const AiSettingsModal = lazy(() => import('./components/AiSettingsModal'))
 const documentIndexVersion = 1
+const looseFilesId = 'raid-loose-files'
 
 
 const makeId = () => crypto.randomUUID()
+const coolProject = (project: RuntimeProject): RuntimeProject => ({
+  ...project,
+  hydrated: false,
+  files: project.files.map((file) => ({ ...file, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false })),
+  conversations: project.conversations.map((conversation) => ({ ...conversation, history: [] })),
+})
 const nextPanelZ = (items: Record<PanelId, PanelLayout>) => Math.max(40, ...Object.values(items).map((item) => item.z)) + 1
 const normalizePanelZ = (items: Record<PanelId, PanelLayout>) => Object.fromEntries(
   (Object.entries(items) as [PanelId, PanelLayout][])
@@ -133,7 +138,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [activeFileId, setActiveFileId] = useState<string | null>(null)
   const [source, setSource] = useState<SourceFile | null>(null)
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
-  const [, setDocumentText] = useState('')
   const [selectedText, setSelectedText] = useState('')
   const [selections, setSelections] = useState<CapturedSelection[]>([])
   const [initialConversationId] = useState<string>(() => makeId())
@@ -146,7 +150,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [pageInput, setPageInput] = useState('1')
   const [zoomInput, setZoomInput] = useState('100')
   const [areaSelectionEnabled, setAreaSelectionEnabled] = useState(false)
-  const [scope, setScope] = useState<'selection' | 'document' | 'project'>('selection')
+  const [scope, setScope] = useState<'selection' | 'document' | 'combination'>('selection')
   const [dark, setDark] = useState(loadDarkTheme)
   const [leftDockWidth, setLeftDockWidth] = useState(() => Number(localStorage.getItem('reading-assistant-left-width')) || 300)
   const [rightDockWidth, setRightDockWidth] = useState(() => Number(localStorage.getItem('reading-assistant-right-width')) || 390)
@@ -162,14 +166,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [error, setError] = useState('')
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [projectMemories, setProjectMemories] = useState<ProjectSummary[]>([])
   const [aiConfig, setAiConfig] = useState<AiConfig>(loadAiConfig)
   const [skills, setSkills] = useState<ImportedSkill[]>(loadSkills)
   const [memorySettings, setMemorySettings] = useState<MemorySettings>(loadMemorySettings)
   const [userMemory, setUserMemory] = useState(loadUserMemory)
   const [deepThinking, setDeepThinking] = useState(false)
-  const [note, setNote] = useState('')
-  const [noteAssets, setNoteAssets] = useState<Record<string, string>>({})
   const [highlights, setHighlights] = useState<DocumentHighlight[]>([])
   const [citationFocus, setCitationFocus] = useState<DocumentReference | null>(null)
   const [annotations, setAnnotations] = useState<DocumentAnnotation[]>([])
@@ -179,14 +180,22 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [tagMode, setTagMode] = useState(false)
   const [recentTagId, setRecentTagId] = useState<string | null>(null)
   const [navigationDepth, setNavigationDepth] = useState(0)
-  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set())
   const [panelLayouts, setPanelLayouts] = useState(() => normalizePanelZ(loadPanelLayouts()))
-  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'selection', 'notes', 'tags', 'chat'])
+  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'selection', 'tags', 'chat'])
+  const [activitySide, setActivitySide] = useState<'left' | 'right'>(() => localStorage.getItem('reading-assistant-activity-side') === 'right' ? 'right' : 'left')
+  const [aiFontSize, setAiFontSize] = useState(() => Math.max(10, Math.min(26, Number(localStorage.getItem('reading-assistant-ai-font-size')) || 12)))
+  const [quickOpenEnabled, setQuickOpenEnabled] = useState(false)
+  const [createCombinationSignal, setCreateCombinationSignal] = useState(0)
   const abortControllersRef = useRef(new Map<string, AbortController>())
-  const hasVisualSelection = aiConfig.visionEnabled && selections.some((item) => item.images.length > 0)
+  const projectsRef = useRef(projects)
+  const currentPageRef = useRef(currentPage)
+  const hasVisualSelection = (aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))) && selections.some((item) => item.images.length > 0)
   const selectionReady = Boolean(selectedText || hasVisualSelection)
   const workerRef = useRef<OcrWorker | null>(null)
   const workerPromiseRef = useRef<Promise<OcrWorker> | null>(null)
+  const workerIdleTimerRef = useRef<number | null>(null)
+  const fileImportQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const openFilesRef = useRef<(files: File[], targetProjectId?: string | null) => Promise<void>>(async () => undefined)
   const fileDragDepthRef = useRef(0)
   const showOcrProgressRef = useRef(false)
   const resultsEndRef = useRef<HTMLDivElement>(null)
@@ -332,6 +341,17 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }
 
   useEffect(() => { activeProjectIdRef.current = activeProjectId }, [activeProjectId])
+  useEffect(() => { projectsRef.current = projects }, [projects])
+  useEffect(() => { currentPageRef.current = currentPage }, [currentPage])
+  useEffect(() => {
+    if (!recentTagId) return
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      if (!target?.closest(`[data-tag-id="${CSS.escape(recentTagId)}"]`)) setRecentTagId(null)
+    }
+    document.addEventListener('pointerdown', dismiss, true)
+    return () => document.removeEventListener('pointerdown', dismiss, true)
+  }, [recentTagId])
   useEffect(() => { activeFileIdRef.current = activeFileId }, [activeFileId])
   useEffect(() => { activeConversationIdRef.current = activeConversationId }, [activeConversationId])
   useEffect(() => { selectionsRef.current = selections }, [selections])
@@ -344,6 +364,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }, [panelLayouts])
   useEffect(() => { localStorage.setItem('reading-assistant-left-width', String(leftDockWidth)) }, [leftDockWidth])
   useEffect(() => { localStorage.setItem('reading-assistant-right-width', String(rightDockWidth)) }, [rightDockWidth])
+  useEffect(() => { localStorage.setItem('reading-assistant-ai-font-size', String(aiFontSize)) }, [aiFontSize])
+  useEffect(() => { localStorage.setItem('reading-assistant-activity-side', activitySide) }, [activitySide])
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
@@ -362,7 +384,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const openSettings = () => {
     setSettingsOpen(true)
-    void projectRepository.list().then(setProjectMemories).catch(() => setProjectMemories([]))
+    void window.readingAssistant?.getQuickOpenEnabled().then(setQuickOpenEnabled).catch(() => setQuickOpenEnabled(false))
   }
 
   useEffect(() => {
@@ -371,23 +393,28 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     let active = true
-    const applyRecords = (records: ProjectSummary[]) => {
+    void projectRepository.list().then(async (records) => {
+      const stored = await Promise.all(records.map((record) => projectRepository.get(record.id)))
       if (!active) return
-      setProjectMemories(records)
-      setProjects((existing) => {
-        const restored = records.map((record): RuntimeProject => existing.find((project) => project.id === record.id) || {
-          id: record.id, name: record.name, files: [], conversations: [], activeConversationId: '', activeFileId: record.activeFileId,
-          projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: record.updatedAt, updatedAt: record.updatedAt, hydrated: false,
-        })
-        const recordIds = new Set(records.map((record) => record.id))
-        return [...restored, ...existing.filter((project) => !recordIds.has(project.id))]
+      const now = Date.now()
+      const next: RuntimeProject[] = stored.flatMap((project) => project ? [coolProject({ ...project, isLoose: project.id === looseFilesId || project.isLoose, files: project.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true })] : [])
+      if (!next.some((project) => project.id === looseFilesId)) next.unshift({ id: looseFilesId, name: '未分组文件', isLoose: true, files: [], conversations: [], activeConversationId: '', activeFileId: null, tags: [], createdAt: now, updatedAt: now, hydrated: true })
+      setProjects(() => {
+        try {
+          const order = JSON.parse(localStorage.getItem('reading-assistant-combination-order') || '[]') as string[]
+          const positions = new Map(order.map((id, index) => [id, index]))
+          next.sort((a, b) => (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER))
+        } catch { /* Keep repository order. */ }
+        return next
       })
-    }
-    void projectRepository.list().then(applyRecords).catch(() => undefined)
+    }).catch(() => undefined)
     return () => { active = false }
   }, [])
 
-  useEffect(() => () => { workerRef.current?.terminate() }, [])
+  useEffect(() => () => {
+    if (workerIdleTimerRef.current !== null) window.clearTimeout(workerIdleTimerRef.current)
+    workerRef.current?.terminate()
+  }, [])
 
   useLayoutEffect(() => {
     const container = panelScrollRef.current
@@ -449,36 +476,41 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return {
       ...project,
       files: project.files.map((file) => file.id === activeFileId ? {
-        ...file, source: source || file.source, pdf, sourceLoaded: Boolean(source || file.source),
+        ...file, source: undefined, pdf: null, sourceLoaded: false,
         readingState: { page: currentPage, zoom, scrollTop: readerScrollRef.current?.scrollTop || 0 },
         highlights, annotations, updatedAt: Date.now(),
       } : file),
       conversations: syncedConversations, activeConversationId, activeFileId,
-      projectNotes: note, projectNoteAssets: noteAssets, updatedAt: Date.now(), hydrated: true,
+      updatedAt: Date.now(), hydrated: true,
     }
-  }, [activeProjectId, projects, conversations, activeConversationId, history, activeFileId, source, pdf, currentPage, zoom, highlights, annotations, note, noteAssets])
+  }, [activeProjectId, projects, conversations, activeConversationId, history, activeFileId, currentPage, zoom, highlights, annotations])
 
   useEffect(() => {
     if (!activeProjectId) return
     const timer = window.setTimeout(() => {
       const snapshot = snapshotCurrent()
-      if (snapshot) void projectRepository.save(snapshot).then(() => projectRepository.list()).then(setProjectMemories).catch(() => undefined)
+      if (snapshot) void projectRepository.save(snapshot).catch(() => undefined)
     }, 700)
     return () => window.clearTimeout(timer)
   }, [activeProjectId, snapshotCurrent])
 
   const loadProjectFile = (project: RuntimeProject, file: RuntimeProjectFile | null) => {
+    if (source?.url && source.url !== file?.source?.url && source.url.startsWith('blob:')) URL.revokeObjectURL(source.url)
     setActiveProjectId(project.id); activeProjectIdRef.current = project.id
     setActiveFileId(file?.id || null); activeFileIdRef.current = file?.id || null
     readerControllerRef.current.activate(project.id, file?.id || null)
     setSource(file?.source || null); setPdf(file?.pdf || null)
-    setDocumentText(file?.paragraphs.map((paragraph) => paragraph.text).join('\n\n') || '')
     setSelectedText(''); setSelections([]); selectionsRef.current = []
-    setConversations(project.conversations); setActiveConversationId(project.activeConversationId)
-    activeConversationIdRef.current = project.activeConversationId
-    setHistory(project.conversations.find((item) => item.id === project.activeConversationId)?.history || [])
+    const normalizedConversations = project.conversations.map((item) => {
+      if (item.ownerType === 'file') return { ...item, contextScope: item.contextScope || 'file' as const }
+      return file ? { ...item, ownerType: 'file' as const, fileId: file.id, contextScope: 'combination' as const } : item
+    })
+    const preferred = normalizedConversations.find((item) => item.id === project.activeConversationId && item.fileId === file?.id)
+      || normalizedConversations.find((item) => item.ownerType === 'file' && item.fileId === file?.id)
+    setConversations(normalizedConversations); setActiveConversationId(preferred?.id || '')
+    activeConversationIdRef.current = preferred?.id || ''
+    setHistory(preferred?.history || [])
     setCustomPrompt(''); setZoom(file?.readingState.zoom || 1); setCurrentPage(file?.readingState.page || 1)
-    setNote(project.projectNotes || ''); setNoteAssets(project.projectNoteAssets || {})
     setHighlights(file?.highlights || []); setAnnotations(file?.annotations || [])
     setAnnotationMode(false); setTagMode(false); setCitationFocus(null); setError('')
     pendingPageRestoreRef.current = file?.readingState.page || 1
@@ -487,8 +519,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const hydrateProject = async (project: RuntimeProject) => {
     if (project.hydrated) return project
     const stored = await projectRepository.get(project.id)
-    if (!stored) throw new Error(pack.code === 'en-US' ? 'The project is missing.' : '项目数据缺失。')
-    return { ...stored, files: stored.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true } as RuntimeProject
+    if (!stored) throw new Error(pack.code === 'en-US' ? 'The combination is missing.' : '组合数据缺失。')
+    const withoutLegacyNotes = { ...stored } as typeof stored & { projectNotes?: string; projectNoteAssets?: Record<string, string> }
+    delete withoutLegacyNotes.projectNotes
+    delete withoutLegacyNotes.projectNoteAssets
+    return { ...withoutLegacyNotes, isLoose: stored.id === looseFilesId || stored.isLoose, files: stored.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true } as RuntimeProject
   }
 
   const hydrateProjectFile = async (project: RuntimeProject, fileId: string) => {
@@ -496,7 +531,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     if (!file) throw new Error(pack.code === 'en-US' ? 'The file no longer exists.' : '文件已被删除或不存在。')
     if (file.sourceLoaded && file.source) return { project, file }
     const blob = await projectRepository.getSource(project.id, file.id, file.type)
-    if (!blob) throw new Error(pack.code === 'en-US' ? 'The project source file is missing.' : '项目源文件缺失。')
+    if (!blob) throw new Error(pack.code === 'en-US' ? 'The source file is missing.' : '源文件缺失。')
     const sourceFile = new File([blob], file.name, { type: file.type, lastModified: file.lastModified })
     const hydratedFile: RuntimeProjectFile = { ...file, source: { name: file.name, kind: file.kind, url: URL.createObjectURL(sourceFile), file: sourceFile }, pdf: null, sourceLoaded: true }
     const hydratedProject = { ...project, files: project.files.map((item) => item.id === file.id ? hydratedFile : item), hydrated: true }
@@ -511,7 +546,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       project = await hydrateProject(project)
       const hydrated = await hydrateProjectFile(project, fileId)
       project = { ...hydrated.project, activeFileId: fileId }
-      setProjects((items) => items.map((item) => item.id === projectId ? project! : snapshot && item.id === snapshot.id ? snapshot : item))
+      setProjects((items) => items.map((item) => item.id === projectId ? project! : snapshot && item.id === snapshot.id ? coolProject(snapshot) : item))
       if (snapshot && snapshot.id !== projectId) void projectRepository.save(snapshot)
       loadProjectFile(project, hydrated.file)
       return true
@@ -529,7 +564,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       else {
         const snapshot = snapshotCurrent()
         if (snapshot) void projectRepository.save(snapshot)
-        setProjects((items) => items.map((item) => item.id === id ? project : snapshot && item.id === snapshot.id ? snapshot : item))
+        setProjects((items) => items.map((item) => item.id === id ? project : snapshot && item.id === snapshot.id ? coolProject(snapshot) : item))
         loadProjectFile(project, null)
       }
     } catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')) }
@@ -538,71 +573,116 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const createEmptyProject = (requestedName: string) => {
     const name = requestedName.trim()
     if (!name) return
-    const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
     const now = Date.now()
-    const project: RuntimeProject = { id: makeId(), name, files: [], conversations: [conversation], activeConversationId: conversation.id, activeFileId: null, projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: now, updatedAt: now, hydrated: true }
+    const project: RuntimeProject = { id: makeId(), name, files: [], conversations: [], activeConversationId: '', activeFileId: null, tags: [], createdAt: now, updatedAt: now, hydrated: true }
     const snapshot = snapshotCurrent()
     setProjects((items) => [...items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item), project])
-    loadProjectFile(project, null)
-    void projectRepository.save(project).then(() => projectRepository.list()).then(setProjectMemories)
+    void projectRepository.save(project)
+    return project.id
   }
 
-  const openFile = async (file: File, targetProjectId: string | null = activeProjectId) => {
-    let readableFile = file
-    const lowerName = file.name.toLocaleLowerCase()
-    const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf')
-    const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg|avif)$/i.test(lowerName)
-    if (!isPdf && !isImage) {
-      if (!window.readingAssistant) { setError(t('desktopConversionOnly')); return }
-      setBusy('convert'); setProgress(t('convertingDocument')); setError('')
-      try {
-        const result = await window.readingAssistant.convertDocument({ name: file.name, type: file.type, lastModified: file.lastModified, data: await file.arrayBuffer() })
-        if (result.error || !result.data) {
-          const message = result.error === 'OFFICE_CONVERTER_UNAVAILABLE' ? t('officeConverterUnavailable')
-            : result.error === 'FILE_TOO_LARGE' ? t('fileTooLarge')
-              : result.error === 'EMPTY_FILE' ? t('emptyFile') : t('conversionFailed')
-          throw new Error(message)
-        }
-        const convertedBuffer = new ArrayBuffer(result.data.byteLength)
-        new Uint8Array(convertedBuffer).set(result.data)
-        readableFile = new File([convertedBuffer], file.name, { type: result.type || 'application/pdf', lastModified: file.lastModified })
-      } catch (reason) {
-        setError(reason instanceof Error ? reason.message : t('conversionFailed'))
-        return
-      } finally {
-        setBusy(''); setProgress('')
-      }
-    }
+  const openFiles = async (incomingFiles: File[], targetProjectId: string | null = null) => {
+    if (!incomingFiles.length) return
+    const destinationId = targetProjectId || looseFilesId
     const snapshot = snapshotCurrent()
-    let project = snapshot?.id === targetProjectId ? snapshot : projects.find((item) => item.id === targetProjectId)
+    const residentProject = projectsRef.current.find((item) => item.id === destinationId)
+    const residentHasNewerFiles = Boolean(snapshot?.id === destinationId && residentProject?.files.some((file) => !snapshot.files.some((item) => item.id === file.id)))
+    let project = snapshot?.id === destinationId && !residentHasNewerFiles ? snapshot : residentProject
     if (project && !project.hydrated) project = await hydrateProject(project)
     if (!project) {
-      const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
       const now = Date.now()
-      project = { id: makeId(), name: readableFile.name.replace(/\.[^.]+$/, ''), files: [], conversations: [conversation], activeConversationId: conversation.id, activeFileId: null, projectNotes: '', projectNoteAssets: {}, tags: [], createdAt: now, updatedAt: now, hydrated: true }
+      project = { id: looseFilesId, name: '未分组文件', isLoose: true, files: [], conversations: [], activeConversationId: '', activeFileId: null, tags: [], createdAt: now, updatedAt: now, hydrated: true }
     }
-    const duplicate = project.files.find((item) => item.name === readableFile.name && item.size === readableFile.size && item.lastModified === readableFile.lastModified)
-    if (duplicate) { await openProjectFile(project.id, duplicate.id); return }
-    const now = Date.now()
-    const fileId = makeId()
-    const fileKind = readableFile.type === 'application/pdf' || readableFile.name.toLocaleLowerCase().endsWith('.pdf') ? 'pdf' : 'image'
-    const projectFile: RuntimeProjectFile = {
-      id: fileId, projectId: project.id, name: readableFile.name, kind: fileKind, type: readableFile.type || (fileKind === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
-      size: readableFile.size, lastModified: readableFile.lastModified, createdAt: now, updatedAt: now,
-      readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], paragraphs: [],
-      indexState: { status: 'pending', version: documentIndexVersion },
-      source: { name: readableFile.name, kind: fileKind, url: URL.createObjectURL(readableFile), file: readableFile }, pdf: null, sourceLoaded: true,
+
+    let fileToOpen: RuntimeProjectFile | null = null
+    for (const file of incomingFiles) {
+      let readableFile = file
+      const lowerName = file.name.toLocaleLowerCase()
+      const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf')
+      const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|svg|avif)$/i.test(lowerName)
+      if (!isPdf && !isImage) {
+        if (!window.readingAssistant) { setError(t('desktopConversionOnly')); continue }
+        setBusy('convert'); setProgress(t('convertingDocument')); setError('')
+        try {
+          const result = await window.readingAssistant.convertDocument({ name: file.name, type: file.type, lastModified: file.lastModified, data: await file.arrayBuffer() })
+          if (result.error || !result.data) {
+            const message = result.error === 'OFFICE_CONVERTER_UNAVAILABLE' ? t('officeConverterUnavailable')
+              : result.error === 'FILE_TOO_LARGE' ? t('fileTooLarge')
+                : result.error === 'EMPTY_FILE' ? t('emptyFile') : t('conversionFailed')
+            throw new Error(message)
+          }
+          const convertedBuffer = new ArrayBuffer(result.data.byteLength)
+          new Uint8Array(convertedBuffer).set(result.data)
+          readableFile = new File([convertedBuffer], file.name, { type: result.type || 'application/pdf', lastModified: file.lastModified })
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : t('conversionFailed'))
+          continue
+        } finally {
+          setBusy(''); setProgress('')
+        }
+      }
+
+      const duplicate = project.files.find((item) => item.name === readableFile.name && item.size === readableFile.size && item.lastModified === readableFile.lastModified)
+      if (duplicate) { fileToOpen = duplicate; continue }
+      const now = Date.now()
+      const fileId = makeId()
+      const fileKind = readableFile.type === 'application/pdf' || readableFile.name.toLocaleLowerCase().endsWith('.pdf') ? 'pdf' : 'image'
+      const projectFile: RuntimeProjectFile = {
+        id: fileId, projectId: project.id, name: readableFile.name, kind: fileKind, type: readableFile.type || (fileKind === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
+        size: readableFile.size, lastModified: readableFile.lastModified, createdAt: now, updatedAt: now,
+        readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], paragraphs: [],
+        indexState: { status: 'pending', version: documentIndexVersion },
+        source: { name: readableFile.name, kind: fileKind, url: URL.createObjectURL(readableFile), file: readableFile }, pdf: null, sourceLoaded: true,
+      }
+      const fileConversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId, contextScope: 'file' }
+      project = { ...project, files: [...project.files, projectFile], conversations: [...project.conversations, fileConversation], activeConversationId: fileConversation.id, activeFileId: fileId, updatedAt: now, hydrated: true }
+      await projectRepository.saveSource(project.id, fileId, readableFile)
+      fileToOpen = projectFile
     }
-    project = { ...project, files: [...project.files, projectFile], activeFileId: fileId, updatedAt: now, hydrated: true }
-    await projectRepository.saveSource(project.id, fileId, readableFile)
+    if (!fileToOpen) return
+
     await projectRepository.save(project)
-    setProjects((items) => {
-      const without = items.filter((item) => item.id !== project!.id).map((item) => snapshot && item.id === snapshot.id ? snapshot : item)
-      return [...without, project!]
-    })
-    loadProjectFile(project, projectFile)
-    setProjectMemories(await projectRepository.list())
+    if (!fileToOpen.sourceLoaded || !fileToOpen.source) {
+      const hydrated = await hydrateProjectFile(project, fileToOpen.id)
+      project = hydrated.project
+      fileToOpen = hydrated.file
+    }
+    const openFileId = fileToOpen.id
+    project = {
+      ...project,
+      activeFileId: openFileId,
+      files: project.files.map((item) => item.id === openFileId ? item : { ...item, source: undefined, pdf: null, sourceLoaded: false }),
+    }
+    if (snapshot && snapshot.id !== project.id) void projectRepository.save(snapshot)
+    const nextProjects = [...projectsRef.current.filter((item) => item.id !== project.id).map((item) => snapshot && item.id === snapshot.id ? coolProject(snapshot) : item), project]
+    projectsRef.current = nextProjects
+    setProjects(nextProjects)
+    loadProjectFile(project, project.files.find((item) => item.id === openFileId) || fileToOpen)
   }
+
+  useEffect(() => { openFilesRef.current = openFiles })
+  const openFile = (file: File, targetProjectId: string | null = null) => {
+    const task = fileImportQueueRef.current.then(() => openFilesRef.current([file], targetProjectId))
+    fileImportQueueRef.current = task.catch(() => undefined)
+    return task
+  }
+  const openFileBatch = (files: File[], targetProjectId: string | null = null) => {
+    const task = fileImportQueueRef.current.then(() => openFilesRef.current(files, targetProjectId))
+    fileImportQueueRef.current = task.catch(() => undefined)
+    return task
+  }
+
+  // File-open IPC is intentionally registered once; openFile uses stable browser APIs and current-state setters.
+  useEffect(() => {
+    const bridge = window.readingAssistant
+    if (!bridge?.takePendingOpenFiles || !bridge.onOpenFile) return
+    const accept = (payload: { name: string; type: string; lastModified: number; data: Uint8Array }) => {
+      const bytes = Uint8Array.from(payload.data)
+      void openFile(new File([bytes], payload.name, { type: payload.type, lastModified: payload.lastModified }))
+    }
+    void bridge.takePendingOpenFiles().then((items) => items.forEach(accept))
+    return bridge.onOpenFile(accept)
+  }, [])
 
   const syncCurrentConversation = () => conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item)
 
@@ -615,41 +695,23 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setActiveConversationId(id)
     activeConversationIdRef.current = id
     setHistory(target.history)
+    if (target.contextScope === 'combination' || target.ownerType === 'combination') setScope('combination')
+    else {
+      const lastMode = [...target.history].reverse().find((message) => message.role === 'user')?.contextMode
+      setScope(lastMode === 'document' ? 'document' : 'selection')
+    }
     setError('')
   }
 
   const createConversation = () => {
-    const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
+    if (!activeFileId) return
+    const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId: activeFileId, contextScope: scope === 'combination' ? 'combination' : 'file' }
     setConversations([...syncCurrentConversation(), conversation])
     setActiveConversationId(conversation.id)
     activeConversationIdRef.current = conversation.id
     setHistory([])
     setCustomPrompt('')
     setError('')
-  }
-
-  const createConversationForArea = async (areaId: string) => {
-    setCollapsedProjectIds((items) => { const next = new Set(items); next.delete(areaId); return next })
-    if (areaId === activeProjectId) createConversation()
-    else {
-      const storedTarget = projects.find((item) => item.id === areaId)
-      if (!storedTarget) return
-      let target: RuntimeProject
-      try { target = await hydrateProject(storedTarget) }
-      catch (reason) { setError(reason instanceof Error ? reason.message : t('processFailed')); return }
-      const snapshot = snapshotCurrent()
-      const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
-      const next = { ...target, conversations: [...target.conversations, conversation], activeConversationId: conversation.id }
-      let readyProject: RuntimeProject = next
-      let readyFile: RuntimeProjectFile | null = null
-      if (next.activeFileId) {
-        const hydrated = await hydrateProjectFile(next, next.activeFileId)
-        readyProject = hydrated.project; readyFile = hydrated.file
-      }
-      setProjects((items) => items.map((item) => snapshot && item.id === snapshot.id ? snapshot : item).map((item) => item.id === areaId ? readyProject : item))
-      loadProjectFile(readyProject, readyFile)
-    }
-    setPanelLayouts((items) => ({ ...items, chat: { ...items.chat, open: true, z: nextPanelZ(items) } }))
   }
 
   const deleteConversation = (id: string) => {
@@ -666,9 +728,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     const paste = (event: ClipboardEvent) => {
-      if ((event.target as HTMLElement | null)?.closest('.note-editor')) return
-      const image = Array.from(event.clipboardData?.files || []).find((file) => file.type.startsWith('image/'))
-      if (image) openFile(new File([image], `${t('pastedImage')}-${new Date().toLocaleTimeString().replaceAll(':', '-')}.png`, { type: image.type }))
+      const clipboard = event.clipboardData
+      if (!clipboard) return
+      const pastedFiles = Array.from(clipboard.files)
+      const files = pastedFiles.length ? pastedFiles : Array.from(clipboard.items).flatMap((item) => item.kind === 'file' ? [item.getAsFile()].filter((file): file is File => Boolean(file)) : [])
+      if (!files.length) return
+      event.preventDefault()
+      const imported = files.map((file, index) => {
+        const isClipboardImage = file.type.startsWith('image/')
+        const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg').replace('svg+xml', 'svg') || 'png'
+        return isClipboardImage && (!file.name || file.name === 'image.png')
+          ? new File([file], `${t('pastedImage')}-${new Date().toLocaleTimeString().replaceAll(':', '-')}${files.length > 1 ? `-${index + 1}` : ''}.${extension}`, { type: file.type, lastModified: file.lastModified })
+          : file
+      })
+      void openFileBatch(imported)
     }
     window.addEventListener('paste', paste)
     return () => window.removeEventListener('paste', paste)
@@ -697,8 +770,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       event.preventDefault()
       fileDragDepthRef.current = 0
       setFileDragActive(false)
-      const file = event.dataTransfer?.files?.[0]
-      if (file) void openFile(file)
+      const files = Array.from(event.dataTransfer?.files || [])
+      if (files.length) void openFileBatch(files)
     }
     window.addEventListener('dragenter', enter)
     window.addEventListener('dragover', over)
@@ -822,6 +895,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }
 
   const getWorker = useCallback(async () => {
+    if (workerIdleTimerRef.current !== null) {
+      window.clearTimeout(workerIdleTimerRef.current)
+      workerIdleTimerRef.current = null
+    }
     if (!workerPromiseRef.current) {
       workerPromiseRef.current = import('tesseract.js').then(({ createWorker }) => createWorker(['chi_sim', 'eng'], 1, {
         logger: (message) => {
@@ -847,6 +924,14 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       return result.data.text.trim()
     } finally {
       showOcrProgressRef.current = false
+      if (workerIdleTimerRef.current !== null) window.clearTimeout(workerIdleTimerRef.current)
+      workerIdleTimerRef.current = window.setTimeout(() => {
+        const idleWorker = workerRef.current
+        workerRef.current = null
+        workerPromiseRef.current = null
+        workerIdleTimerRef.current = null
+        void idleWorker?.terminate()
+      }, 5 * 60 * 1000)
     }
   }, [getWorker, t])
 
@@ -867,7 +952,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           const { extractPdfRegionText } = await import('./lib/pdf')
           part = await extractPdfRegionText(pdf, selectedRegion.page, selectedRegion.region)
         }
-        if (!part && !aiConfig.visionEnabled) part = await recognize(result.images[index])
+        const selectionVisionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
+        if (!part && !selectionVisionAvailable) part = await recognize(result.images[index])
         const annotationText = result.annotationTexts?.[index]?.trim() || ''
         textParts[index] = [part, annotationText && `批注：${annotationText}`].filter(Boolean).join('\n')
       }
@@ -877,7 +963,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       const text = survivingParts.filter(Boolean).join('\n\n')
       setSelections((items) => { const next = items.map((item) => item.id === selectionId ? { ...item, text, textParts: survivingParts, loading: false } : item); selectionsRef.current = next; return next })
       if (text) setSelectedText((previous) => [previous, text].filter(Boolean).join('\n\n'))
-      if (!text && !aiConfig.visionEnabled) setError(t('noText'))
+      const selectionVisionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
+      if (!text && !selectionVisionAvailable) setError(t('noText'))
     } catch (reason) {
       setSelections((items) => { const next = items.map((item) => item.id === selectionId ? { ...item, loading: false } : item); selectionsRef.current = next; return next })
       setError(reason instanceof Error ? `${t('ocrFailed')}: ${reason.message}` : t('ocrFailed'))
@@ -908,44 +995,30 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     if (!source || !activeProjectId || !activeFileId || (source.kind === 'pdf' && !pdf)) return
-    const project = projects.find((item) => item.id === activeProjectId)
+    const project = projectsRef.current.find((item) => item.id === activeProjectId)
     const file = project?.files.find((item) => item.id === activeFileId)
     if (!project || !file || file.indexState.status === 'indexing' || file.indexState.status === 'ready') return
+    const controller = new AbortController()
     const timer = window.setTimeout(() => {
+      if (controller.signal.aborted) return
       const indexing = { ...file, indexState: { status: 'indexing' as const, version: documentIndexVersion } }
       setProjects((items) => items.map((item) => item.id === project.id ? { ...item, files: item.files.map((entry) => entry.id === file.id ? indexing : entry) } : item))
       const task = source.kind === 'pdf' && pdf
-        ? import('./services/documentIndexer').then(({ documentIndexer }) => documentIndexer.indexPdf(pdf, project.id, file.id, (done, total) => setProgress(`${t('extracting')} ${done}/${total}`)))
-        : recognize(source.url).then((text) => ({
-            paragraphs: text.trim() ? [{ id: `${file.id}:image`, projectId: project.id, fileId: file.id, page: 1, region: { left: .02, top: .02, width: .96, height: .96 }, text: text.replace(/\s+/g, ' ').trim(), textHash: `${text.length}:${text.slice(0, 40)}`, order: 0 }] : [],
+        ? import('./services/documentIndexer').then(({ documentIndexer }) => documentIndexer.indexPdf(pdf, project.id, file.id, undefined, { signal: controller.signal, priorityPage: currentPageRef.current }))
+        : Promise.resolve({
+            paragraphs: [],
             state: { status: 'ready' as const, version: documentIndexVersion, indexedAt: Date.now() },
-          }))
-      void task.then(async ({ paragraphs, state }) => {
-        if (source.kind === 'pdf' && pdf && paragraphs.reduce((sum, paragraph) => sum + paragraph.text.length, 0) < 80) {
-          const ocrParagraphs = []
-          for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-            setProgress(`${t('scannedOcr')} ${pageNumber}/${pdf.numPages}`)
-            const page = await pdf.getPage(pageNumber)
-            const viewport = page.getViewport({ scale: 1.25 })
-            const canvas = document.createElement('canvas'); canvas.width = viewport.width; canvas.height = viewport.height
-            const context = canvas.getContext('2d')
-            if (context) {
-              await page.render({ canvasContext: context, viewport, canvas }).promise
-              const text = (await recognize(canvas.toDataURL('image/jpeg', .9))).replace(/\s+/g, ' ').trim()
-              if (text) ocrParagraphs.push({ id: `${file.id}:ocr:${pageNumber}`, projectId: project.id, fileId: file.id, page: pageNumber, region: { left: .02, top: .02, width: .96, height: .96 }, text, textHash: stableTextHash(text), order: ocrParagraphs.length })
-            }
-            page.cleanup()
-          }
-          if (ocrParagraphs.length) paragraphs = ocrParagraphs
-        }
-        setDocumentText(paragraphs.map((paragraph) => paragraph.text).join('\n\n'))
+          })
+      void task.then(({ paragraphs, state }) => {
+        if (controller.signal.aborted) return
         setProjects((items) => items.map((item) => item.id === project.id ? { ...item, updatedAt: Date.now(), files: item.files.map((entry) => entry.id === file.id ? { ...entry, paragraphs, indexState: state, updatedAt: Date.now() } : entry) } : item))
       }).catch((reason) => {
-        setProjects((items) => items.map((item) => item.id === project.id ? { ...item, files: item.files.map((entry) => entry.id === file.id ? { ...entry, indexState: { status: 'error', version: documentIndexVersion, error: reason instanceof Error ? reason.message : String(reason) } } : entry) } : item))
+        const cancelled = reason instanceof DOMException && reason.name === 'AbortError'
+        setProjects((items) => items.map((item) => item.id === project.id ? { ...item, files: item.files.map((entry) => entry.id === file.id ? { ...entry, indexState: cancelled ? { status: 'pending', version: documentIndexVersion } : { status: 'error', version: documentIndexVersion, error: reason instanceof Error ? reason.message : String(reason) } } : entry) } : item))
       })
-    }, 350)
-    return () => window.clearTimeout(timer)
-  }, [source, pdf, activeProjectId, activeFileId, projects, recognize, t])
+    }, source.kind === 'pdf' && (pdf?.numPages || 0) > 100 ? 1200 : 450)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [source, pdf, activeProjectId, activeFileId])
 
   const buildProjectContext = (workspaceId: string, query: string, action: AiAction, fileId?: string) => {
     const project = snapshotCurrent()?.id === workspaceId ? snapshotCurrent() : projects.find((item) => item.id === workspaceId)
@@ -1015,21 +1088,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const changeMemorySettings = (settings: MemorySettings) => setMemorySettings(settings)
   const changeUserMemory = (value: string) => setUserMemory(value.slice(0, 12000))
 
-  const deleteProject = async (projectId: string) => {
-    const target = projects.find((project) => project.id === projectId)
-    target?.files.forEach((file) => { if (file.source?.url) URL.revokeObjectURL(file.source.url) })
-    await projectRepository.deleteProject(projectId)
-    const remaining = projects.filter((project) => project.id !== projectId)
-    setProjects(remaining)
-    navigationRef.current.clear(); setNavigationDepth(0)
-    if (projectId === activeProjectId) {
-      const next = remaining.at(-1)
-      if (next) await openProject(next.id)
-      else { setActiveProjectId(null); setActiveFileId(null); activeProjectIdRef.current = null; activeFileIdRef.current = null; readerControllerRef.current.clear(); setSource(null); setAnnotations([]); setAnnotationMode(false); setTagMode(false) }
-    }
-    setProjectMemories(await projectRepository.list())
-  }
-
   const learnUserMemory = (userRequest: string, assistantResponse: string) => {
     if (!memorySettingsRef.current.userMemoryEnabled) return
     memoryUpdateQueueRef.current = memoryUpdateQueueRef.current.then(async () => {
@@ -1069,34 +1127,40 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       effectiveInstruction = commandMatch?.[2]?.trim() || (pack.code === 'en-US' ? 'Apply this skill to the current material.' : '请使用此 Skill 处理当前材料。')
     }
     const workspaceId = activeProjectId
+    if (scope === 'combination' && activeProjectId === looseFilesId) { setError('当前文件不在组合中，无法使用“对组合”。'); return }
+    const expectedContextScope = scope === 'combination' ? 'combination' : 'file'
     let conversationId = activeConversationId
     let previousHistory = history
-    if (!conversationId || !conversations.some((item) => item.id === conversationId)) {
-      const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [] }
+    const activeRoute = conversations.find((item) => item.id === conversationId)
+    const routeMatches = activeRoute && activeRoute.ownerType === 'file' && activeRoute.fileId === activeFileId && (activeRoute.contextScope || 'file') === expectedContextScope
+    if (!conversationId || !routeMatches) {
+      const existing = conversations.find((item) => item.ownerType === 'file' && item.fileId === activeFileId && (item.contextScope || 'file') === expectedContextScope)
+      const conversation: Conversation = existing || { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId: activeFileId || undefined, contextScope: expectedContextScope }
       conversationId = conversation.id
-      previousHistory = []
-      setConversations((items) => [...items, conversation])
+      previousHistory = conversation.history
+      if (!existing) setConversations((items) => [...items, conversation])
       setActiveConversationId(conversationId)
       activeConversationIdRef.current = conversationId
-      setHistory([])
+      setHistory(previousHistory)
     }
     const taskKey = `${workspaceId}:${conversationId}`
     if (aiTasks.has(taskKey)) return
     chatFollowSuspendedRef.current = false
     chatAutoFollowRef.current = true
     const targetUsesContext = scope !== 'selection'
-    const targetIsProject = scope === 'project'
-    const selectionImages = targetUsesContext ? [] : selections.flatMap((item) => item.images).slice(0, 4)
+    const targetIsProject = scope === 'combination'
+    const selectionImages = targetUsesContext ? [] : selections.flatMap((item) => item.images)
     const selectionUsesText = !targetUsesContext && Boolean(selectedText.trim())
     const fastSelectionTranslation = selectionUsesText && action === 'translate'
-    const requestImages = selectionUsesText ? [] : selectionImages
+    const visionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
+    const requestImages = visionAvailable ? selectionImages : []
     const reasoningActive = deepThinking && aiConfig.reasoningEnabled
     const actionLabel = (requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId)?.name : effectiveInstruction) || ({ translate: t('translate'), explain: t('explain'), insight: t('insight'), summarize: t('summarize'), custom: 'AI' }[action])
     const emptySelectionChat = !targetUsesContext && !selectionUsesText && selectionImages.length === 0 && action === 'custom' && Boolean(effectiveInstruction)
-    const scopeLabel = targetIsProject ? '项目' : targetUsesContext ? t('documentScope') : t('selectedScope')
+    const scopeLabel = targetIsProject ? '组合' : targetUsesContext ? t('documentScope') : t('selectedScope')
     const userLabel = emptySelectionChat ? t('selectedScope') : `${scopeLabel} · ${actionLabel}`
     const activeProjectName = projects.find((item) => item.id === activeProjectId)?.name || source.name
-    const targetText = targetIsProject ? `项目：${activeProjectName}` : targetUsesContext ? `文件：${source.name}` : emptySelectionChat ? effectiveInstruction : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
+    const targetText = targetIsProject ? `组合：${activeProjectName}` : targetUsesContext ? `文件：${source.name}` : emptySelectionChat ? effectiveInstruction : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
     const contextMode: ChatMessage['contextMode'] = scope
     const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, prompt: effectiveInstruction || actionLabel, contextMode, label: userLabel, sourcePage: currentPage }
     const assistantId = makeId()
@@ -1138,7 +1202,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           responseLanguage: pack.aiLanguage,
           userMemory: targetUsesContext && memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
           selectionHasImages: requestImages.length > 0,
-          selectionImages: aiConfig.visionEnabled ? requestImages : [],
+          selectionImages: requestImages,
           skills: targetUsesContext || requestedSkillId ? skills.map(({ id, name, command, description, instructions }) => ({ id, name, command, description, instructions })) : [],
           requestedSkillId,
         }),
@@ -1230,11 +1294,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const addTagAt = (page: number, region: NormalizedRegion) => {
     if (!activeProjectId || !activeFileId) return
+    setCitationFocus(null)
     const tag = createTag(activeProjectId, activeFileId, page, region, '')
     setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: [...project.tags, tag], updatedAt: Date.now() } : project))
     setRecentTagId(tag.id)
-    setCitationFocus({ page, region })
-    window.setTimeout(() => setCitationFocus(null), 1800)
   }
 
   const addTextToAi = (text: string) => {
@@ -1242,7 +1305,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setSelections((items) => { const next = [...items, { id: selectionId, image: '', images: [], page: currentPage, regions: [], text, textParts: [text], loading: false }]; selectionsRef.current = next; return next })
     setSelectedText((previous) => [previous, text].filter(Boolean).join('\n\n'))
     setScope('selection')
-    setPanelLayouts((items) => ({ ...items, chat: { ...items.chat, open: true, z: nextPanelZ(items) } }))
   }
 
   const translateTextInline = async (text: string, signal: AbortSignal, onDelta: (delta: string) => void) => {
@@ -1304,7 +1366,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return index < 0 ? Number.MAX_SAFE_INTEGER : index
   }
   const visiblePanelIds = (Object.keys(panelLayouts) as PanelId[])
-    .filter((id) => panelLayouts[id].open && (id === 'projects' || ((id === 'notes' || id === 'tags') && Boolean(activeProjectId)) || Boolean(source)))
+    .filter((id) => panelLayouts[id].open && (id === 'projects' || (id === 'tags' && projects.some((project) => project.tags.length)) || Boolean(source)))
     .sort((first, second) => panelPosition(first) - panelPosition(second))
   const leftPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'left')
   const rightPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'right')
@@ -1326,37 +1388,121 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return [...items, { ...item, id: makeId() }]
   })
 
-  const openProjectNotes = (areaId: string) => {
-    void openProject(areaId)
-    setPanelLayouts((items) => ({ ...items, notes: { ...items.notes, open: true, z: nextPanelZ(items) } }))
-  }
-  const toggleProjectConversations = (areaId: string) => {
-    if (areaId !== activeProjectId) void openProject(areaId)
-    setCollapsedProjectIds((items) => {
-      const next = new Set(items)
-      if (areaId === activeProjectId && !next.has(areaId)) next.add(areaId)
-      else next.delete(areaId)
-      return next
-    })
-  }
-  const openProjectConversation = (conversationId: string) => {
-    openConversation(conversationId)
+  const openProjectConversation = async (projectId: string, conversationId: string) => {
+    if (projectId === activeProjectId) openConversation(conversationId)
+    else {
+      const candidate = projects.find((item) => item.id === projectId)
+      if (!candidate) return
+      try {
+        let project = await hydrateProject(candidate)
+        let file: RuntimeProjectFile | null = null
+        if (project.activeFileId) { const hydrated = await hydrateProjectFile(project, project.activeFileId); project = hydrated.project; file = hydrated.file }
+        const target = project.conversations.find((item) => item.id === conversationId)
+        if (!target) return
+        const snapshot = snapshotCurrent()
+        if (snapshot && snapshot.id !== project.id) void projectRepository.save(snapshot)
+        setProjects((items) => items.map((item) => item.id === project.id ? project : snapshot && item.id === snapshot.id ? coolProject(snapshot) : item))
+        loadProjectFile({ ...project, activeConversationId: conversationId }, file)
+        setScope(target.contextScope === 'combination' || target.ownerType === 'combination' ? 'combination' : [...target.history].reverse().find((message) => message.role === 'user')?.contextMode === 'document' ? 'document' : 'selection')
+      } catch (reason) { setError(reason instanceof Error ? reason.message : '无法打开对话。') }
+    }
     setPanelLayouts((items) => ({ ...items, chat: { ...items.chat, open: true, z: nextPanelZ(items) } }))
   }
   const currentProject = projects.find((project) => project.id === activeProjectId)
-  const confirmDeleteProject = (projectId: string) => {
-    if (window.confirm('删除项目将永久删除其中全部文件、对话、笔记、标签、批注、高亮、资源和索引。继续吗？')) void deleteProject(projectId)
+  const renameCombination = (projectId: string, name: string) => {
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+    const next = { ...project, name, updatedAt: Date.now() }
+    setProjects((items) => items.map((item) => item.id === projectId ? next : item))
+    if (next.hydrated) void projectRepository.save(next)
+    else void projectRepository.get(projectId).then((stored) => stored && projectRepository.save({ ...stored, name, updatedAt: next.updatedAt })).catch(() => undefined)
+  }
+  const reorderCombination = (projectId: string, targetIndex: number) => setProjects((items) => {
+    const combinations = items.filter((item) => !item.isLoose && item.id !== looseFilesId)
+    const loose = items.filter((item) => item.isLoose || item.id === looseFilesId)
+    const from = combinations.findIndex((item) => item.id === projectId)
+    if (from < 0) return items
+    const next = [...combinations]; const [moved] = next.splice(from, 1); next.splice(Math.max(0, Math.min(next.length, targetIndex)), 0, moved); next.push(...loose)
+    localStorage.setItem('reading-assistant-combination-order', JSON.stringify(next.map((item) => item.id)))
+    return next
+  })
+  const moveProjectFile = async (sourceId: string, fileId: string, targetId: string, beforeFileId?: string) => {
+    const snapshot = snapshotCurrent()
+    let sourceProject = snapshot?.id === sourceId ? snapshot : projects.find((item) => item.id === sourceId)
+    let targetProject = snapshot?.id === targetId ? snapshot : projects.find((item) => item.id === targetId)
+    if (!sourceProject || !targetProject) return
+    try {
+      sourceProject = await hydrateProject(sourceProject); targetProject = sourceId === targetId ? sourceProject : await hydrateProject(targetProject)
+      const file = sourceProject.files.find((item) => item.id === fileId)
+      if (!file) return
+      if (sourceId === targetId) {
+        const files = sourceProject.files.filter((item) => item.id !== fileId)
+        const before = beforeFileId ? files.findIndex((item) => item.id === beforeFileId) : files.length
+        files.splice(before < 0 ? files.length : before, 0, file)
+        const next = { ...sourceProject, files, updatedAt: Date.now() }
+        await projectRepository.save(next); setProjects((items) => items.map((item) => item.id === sourceId ? (sourceId === activeProjectId ? next : coolProject(next)) : item)); return
+      }
+      const blob = await projectRepository.getSource(sourceId, fileId, file.type)
+      if (!blob) throw new Error('源文件缺失，无法移动。')
+      const movedFile: RuntimeProjectFile = { ...file, projectId: targetId, paragraphs: file.paragraphs.map((paragraph) => ({ ...paragraph, projectId: targetId })), updatedAt: Date.now() }
+      const targetFiles = [...targetProject.files]
+      const insertAt = beforeFileId ? targetFiles.findIndex((item) => item.id === beforeFileId) : targetFiles.length
+      targetFiles.splice(insertAt < 0 ? targetFiles.length : insertAt, 0, movedFile)
+      const movedConversations = sourceProject.conversations.filter((item) => item.ownerType === 'file' && item.fileId === fileId)
+      const movedTags = sourceProject.tags.filter((item) => item.fileId === fileId).map((item) => ({ ...item, projectId: targetId }))
+      const nextSource: RuntimeProject = { ...sourceProject, files: sourceProject.files.filter((item) => item.id !== fileId), conversations: sourceProject.conversations.filter((item) => !(item.ownerType === 'file' && item.fileId === fileId)), tags: sourceProject.tags.filter((item) => item.fileId !== fileId), activeFileId: sourceProject.activeFileId === fileId ? sourceProject.files.find((item) => item.id !== fileId)?.id || null : sourceProject.activeFileId, updatedAt: Date.now() }
+      const nextTarget: RuntimeProject = { ...targetProject, files: targetFiles, conversations: [...targetProject.conversations, ...movedConversations], tags: [...targetProject.tags, ...movedTags], activeFileId: fileId, activeConversationId: movedConversations[0]?.id || targetProject.activeConversationId, updatedAt: Date.now() }
+      await projectRepository.saveSource(targetId, fileId, new File([blob], file.name, { type: file.type, lastModified: file.lastModified }))
+      await Promise.all([projectRepository.save(nextSource), projectRepository.save(nextTarget)])
+      await projectRepository.deleteFile(sourceId, fileId)
+      setProjects((items) => items.map((item) => item.id === sourceId ? (sourceId === activeProjectId ? nextSource : coolProject(nextSource)) : item.id === targetId ? (targetId === activeProjectId ? nextTarget : coolProject(nextTarget)) : item))
+      navigationRef.current.clear(); setNavigationDepth(0)
+      if (activeFileId === fileId) loadProjectFile(nextTarget, movedFile)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '移动文件失败。') }
+  }
+  const dissolveCombination = async (projectId: string) => {
+    let group = snapshotCurrent()?.id === projectId ? snapshotCurrent() : projects.find((item) => item.id === projectId)
+    let loose = projects.find((item) => item.id === looseFilesId)
+    if (!group || !loose || group.isLoose) return
+    try {
+      group = await hydrateProject(group); loose = await hydrateProject(loose)
+      const movedFiles: RuntimeProjectFile[] = []
+      for (const file of group.files) {
+        const blob = await projectRepository.getSource(group.id, file.id, file.type)
+        if (!blob) throw new Error(`无法找到 ${file.name} 的源文件。`)
+        await projectRepository.saveSource(loose.id, file.id, new File([blob], file.name, { type: file.type, lastModified: file.lastModified }))
+        movedFiles.push({ ...file, projectId: loose.id, paragraphs: file.paragraphs.map((paragraph) => ({ ...paragraph, projectId: loose!.id })) })
+      }
+      const fileIds = new Set(group.files.map((file) => file.id))
+      const nextLoose: RuntimeProject = { ...loose, files: [...loose.files, ...movedFiles], conversations: [...loose.conversations, ...group.conversations.filter((item) => item.ownerType === 'file' && item.fileId && fileIds.has(item.fileId))], tags: [...loose.tags, ...group.tags.map((tag) => ({ ...tag, projectId: loose!.id }))], updatedAt: Date.now(), hydrated: true }
+      await projectRepository.save(nextLoose)
+      await projectRepository.deleteProject(group.id)
+      navigationRef.current.clear(); setNavigationDepth(0)
+      const nextProjects = projects.filter((item) => item.id !== group!.id).map((item) => item.id === loose!.id ? (loose!.id === activeProjectId ? nextLoose : coolProject(nextLoose)) : item)
+      setProjects(nextProjects)
+      if (activeProjectId === group.id) {
+        const active = movedFiles.find((item) => item.id === activeFileId) || movedFiles[0] || null
+        loadProjectFile(nextLoose, active)
+      }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '分解组合失败。') }
+  }
+  const deleteConversationInProject = async (projectId: string, conversationId: string) => {
+    if (projectId === activeProjectId) { deleteConversation(conversationId); return }
+    const project = projects.find((item) => item.id === projectId); if (!project) return
+    const hydrated = await hydrateProject(project); const next = { ...hydrated, conversations: hydrated.conversations.filter((item) => item.id !== conversationId), updatedAt: Date.now() }
+    await projectRepository.save(next); setProjects((items) => items.map((item) => item.id === projectId ? coolProject(next) : item))
   }
   const deleteProjectFile = async (projectId: string, fileId: string) => {
-    const base = snapshotCurrent()?.id === projectId ? snapshotCurrent() : projects.find((project) => project.id === projectId)
-    if (!base || !window.confirm('删除文件将永久删除该文件的阅读位置、高亮、批注、文件笔记、标签、资源和索引。继续吗？')) return
+    let base = snapshotCurrent()?.id === projectId ? snapshotCurrent() : projects.find((project) => project.id === projectId)
+    if (!base || !window.confirm('删除文件将永久删除该文件的对话、阅读位置、高亮、批注、标签、资源和索引。继续吗？')) return
+    base = await hydrateProject(base)
     const removed = base.files.find((file) => file.id === fileId)
     if (removed?.source?.url) URL.revokeObjectURL(removed.source.url)
     const files = base.files.filter((file) => file.id !== fileId)
-    const next: RuntimeProject = { ...base, files, tags: tagsWithoutFile(base.tags, fileId), activeFileId: base.activeFileId === fileId ? files[0]?.id || null : base.activeFileId, updatedAt: Date.now() }
+    const next: RuntimeProject = { ...base, files, conversations: base.conversations.filter((item) => !(item.ownerType === 'file' && item.fileId === fileId)), tags: tagsWithoutFile(base.tags, fileId), activeFileId: base.activeFileId === fileId ? files[0]?.id || null : base.activeFileId, updatedAt: Date.now() }
     await projectRepository.deleteFile(projectId, fileId)
     await projectRepository.save(next)
-    setProjects((items) => items.map((project) => project.id === projectId ? next : project))
+    setProjects((items) => items.map((project) => project.id === projectId ? (projectId === activeProjectId ? next : coolProject(next)) : project))
     if (projectId === activeProjectId && fileId === activeFileId) {
       if (next.activeFileId) {
         const hydrated = await hydrateProjectFile(next, next.activeFileId)
@@ -1364,37 +1510,43 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         loadProjectFile(hydrated.project, hydrated.file)
       } else loadProjectFile(next, null)
     }
-    setProjectMemories(await projectRepository.list())
+  }
+  const updateTagOwner = async (id: string, update: (tags: DocumentTag[]) => DocumentTag[]) => {
+    const owner = projects.find((project) => project.tags.some((tag) => tag.id === id))
+    if (!owner) return
+    const hydrated = owner.id === activeProjectId ? snapshotCurrent() || owner : await hydrateProject(owner)
+    const next = { ...hydrated, tags: update(hydrated.tags), updatedAt: Date.now() }
+    setProjects((items) => items.map((project) => project.id === owner.id ? (owner.id === activeProjectId ? next : coolProject(next)) : project))
+    await projectRepository.save(next)
   }
   const deleteTag = (id: string) => {
     if (id === recentTagId) setRecentTagId(null)
-    setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: project.tags.filter((tag) => tag.id !== id), updatedAt: Date.now() } : project))
+    void updateTagOwner(id, (tags) => tags.filter((tag) => tag.id !== id))
   }
   const renameTag = (id: string, label: string) => {
     if (id === recentTagId) setRecentTagId(null)
-    setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: project.tags.map((tag) => tag.id === id ? { ...tag, label } : tag), updatedAt: Date.now() } : project))
+    void updateTagOwner(id, (tags) => tags.map((tag) => tag.id === id ? { ...tag, label } : tag))
   }
-  const moveTag = (id: string, region: NormalizedRegion) => setProjects((items) => items.map((project) => project.id === activeProjectId ? { ...project, tags: project.tags.map((tag) => tag.id === id ? { ...tag, region } : tag), updatedAt: Date.now() } : project))
+  const moveTag = (id: string, region: NormalizedRegion) => { void updateTagOwner(id, (tags) => tags.map((tag) => tag.id === id ? { ...tag, region } : tag)) }
   const projectContent = <ProjectExplorer
-    projects={projects.map((project) => ({ id: project.id, name: project.name, busy: Array.from(aiTasks).some((key) => key.startsWith(`${project.id}:`)), files: project.files.map((file) => ({ id: file.id, name: file.name, indexStatus: file.indexState.status })) }))}
+    projects={projects.map((project) => ({ id: project.id, name: project.name, isLoose: project.isLoose || project.id === looseFilesId, busy: Array.from(aiTasks).some((key) => key.startsWith(`${project.id}:`)), files: project.files.map((file) => ({ id: file.id, name: file.name, indexStatus: file.indexState.status })), conversations: project.id === activeProjectId ? conversations : project.conversations }))}
     activeProjectId={activeProjectId}
     activeFileId={activeFileId}
     activeConversationId={activeConversationId}
-    conversations={conversations}
-    collapsedProjectIds={collapsedProjectIds}
+    createSignal={createCombinationSignal}
     onCreateProject={createEmptyProject}
     onOpenProject={openProject}
-    onAddFile={(projectId, file) => openFile(file, projectId)}
+    onAddFile={(projectId, files) => openFileBatch(files, projectId)}
     onOpenFile={(projectId, fileId) => void openProjectFile(projectId, fileId)}
     onDeleteFile={(projectId, fileId) => void deleteProjectFile(projectId, fileId)}
-    onDeleteProject={confirmDeleteProject}
-    onCreateConversation={createConversationForArea}
-    onOpenNotes={openProjectNotes}
-    onToggleProject={toggleProjectConversations}
     onOpenConversation={openProjectConversation}
-    onDeleteConversation={deleteConversation}
+    onDeleteConversation={(projectId, conversationId) => void deleteConversationInProject(projectId, conversationId)}
+    onRenameCombination={renameCombination}
+    onDissolveCombination={(id) => void dissolveCombination(id)}
+    onMoveFile={(sourceId, fileId, targetId, beforeId) => void moveProjectFile(sourceId, fileId, targetId, beforeId)}
+    onReorderCombination={reorderCombination}
   />
-  const tagContent = <TagPanel tags={currentProject?.tags || []} files={currentProject?.files || []} tagMode={tagMode} recentTagId={recentTagId} canGoBack={navigationDepth > 0} onToggleTagMode={toggleTagMode} onBack={() => void navigateBack()} onOpen={openTag} onRename={renameTag} onDelete={deleteTag} />
+  const tagContent = <TagPanel tags={projects.flatMap((project) => project.tags)} files={projects.flatMap((project) => project.files)} tagMode={tagMode} recentTagId={recentTagId} canGoBack={navigationDepth > 0} onToggleTagMode={toggleTagMode} onBack={() => void navigateBack()} onOpen={openTag} onRename={renameTag} onDelete={deleteTag} onDismissRecent={() => setRecentTagId(null)} />
 
   const selectionHasImages = selections.some((selection) => selection.images.length > 0)
   const selectionContent = <div className="selection-panel-body single" ref={selectionBodyRef}><section className="selection-content-section">
@@ -1402,12 +1554,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     {selections.length === 0 ? <div className="selection-empty"><MousePointer2 size={22} /></div> : <div className={`selection-result-split ${selectionHasImages ? 'with-images' : 'text-only'}`} ref={selectionSplitRef} style={selectionHasImages ? { gridTemplateRows: `minmax(72px, ${selectionSplitRatio}fr) 7px minmax(72px, ${1 - selectionSplitRatio}fr)` } : undefined}>{selectionHasImages && <div className="selection-image-pane" ref={selectionImagesRef}><div className="selection-strip">{selections.flatMap((selection) => selection.images.map((image, imageIndex) => <div className="selection-thumb" key={`${selection.id}-${imageIndex}`}><img src={image} alt="选区预览" />{selection.loading && <span><LoaderCircle className="spin" size={10} /></span>}<button className="remove-selection-image" onClick={() => removeSelectionImage(selection.id, imageIndex)}><X size={11} /></button></div>))}</div></div>}{selectionHasImages && <div className="section-resizer" role="separator" aria-label="调整选区图片与识别文字高度" aria-orientation="horizontal" title="拖动调整图片与识别文字高度" onPointerDown={startSelectionSplit} onPointerMove={moveSelectionSplit} onPointerUp={stopSelectionSplit} onPointerCancel={stopSelectionSplit} />}{busy === 'ocr' ? <div className="inline-loading selection-text-pane"><LoaderCircle className="spin" size={16} /> {progress}</div> : <textarea className="selection-text-pane" ref={selectionTextRef} value={selectedText} onChange={(e) => setSelectedText(e.target.value)} />}</div>}
   </section></div>
 
-  const chatContent = <div className="chat-panel-layout">
+  const chatContent = <div className="chat-panel-layout" style={{ '--ai-font-size': `${aiFontSize}px` } as CSSProperties}>
     <section className="ai-fixed-controls">
-      <div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button><button className={scope === 'project' ? 'active' : ''} onClick={() => setScope('project')}>对项目</button></div>
+      <div className="scope-toolbar"><div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button><button disabled={activeProjectId === looseFilesId} className={scope === 'combination' ? 'active' : ''} onClick={() => setScope('combination')}>对组合</button></div></div>
       <div className="action-grid"><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
     </section>
-    <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode)} onScroll={(event) => trackChatPosition(event.currentTarget)}>
+    <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => { if (event.ctrlKey) { event.preventDefault(); setAiFontSize((value) => Math.max(10, Math.min(26, value + (event.deltaY < 0 ? 1 : -1)))); return } stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode) }} onScroll={(event) => trackChatPosition(event.currentTarget)}>
       <section className="conversation">
         {history.map((message) => message.role === 'user'
           ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div>
@@ -1427,41 +1579,41 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       </section>
       {error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}
     </div>
-    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'project' ? '针对整个项目提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
+    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'combination' ? '针对整个组合提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
-  const notesContent = activeProjectId ? <NoteEditor fileName={currentProject?.name || '项目'} value={note} onChange={setNote} assets={noteAssets} onAssetsChange={setNoteAssets} /> : null
-  const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, notes: notesContent, tags: tagContent }
+  const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, tags: tagContent }
   const panelMeta: Record<PanelId, { title: string; icon: ReactNode; actions?: ReactNode }> = {
-    projects: { title: '项目', icon: <FolderOpen size={15} /> }, selection: { title: t('selection'), icon: <MousePointer2 size={15} /> },
-    chat: { title: t('aiAssistant'), icon: <BrainCircuit size={16} />, actions: <button onClick={createConversation} title={t('newConversation')}><Plus size={14} /></button> }, notes: { title: '笔记', icon: <StickyNote size={15} /> },
+    projects: { title: '文件', icon: <FolderOpen size={15} />, actions: <button onClick={() => setCreateCombinationSignal((value) => value + 1)} title="新建组合"><Combine size={15} /></button> }, selection: { title: t('selection'), icon: <MousePointer2 size={15} /> },
+    chat: { title: '对话', icon: <BrainCircuit size={16} />, actions: <button onClick={createConversation} title={t('newConversation')}><Plus size={14} /></button> },
     tags: { title: '标签', icon: <Tag size={15} /> },
   }
   const renderPanel = (id: PanelId) => <WorkspacePanel key={id} id={id} title={panelMeta[id].title} icon={panelMeta[id].icon} actions={panelMeta[id].actions} layout={panelLayouts[id]} onChange={(layout) => updatePanel(id, layout)} onFocus={() => raisePanel(id)}>{panelContent[id]}</WorkspacePanel>
   const renderDockPanels = (ids: PanelId[]) => ids.map((id, index) => <Fragment key={id}>{renderPanel(id)}{index < ids.length - 1 && <div className="dock-splitter" onPointerDown={(event) => startDockSplitResize(id, ids[index + 1], event)} />}</Fragment>)
 
   return (
-    <div className="app-shell modern-shell">
+    <div className={`app-shell modern-shell activity-${activitySide}`}>
       {fileDragActive && <div className="file-drop-overlay"><div><FolderOpen size={32} /><strong>{t('dropToOpen')}</strong><small>{t('dropToOpenHelp')}</small></div></div>}
       {busy === 'convert' && <div className="conversion-overlay"><LoaderCircle className="spin" size={24} /><strong>{progress || t('convertingDocument')}</strong></div>}
       <ActivityBar
-        openPanels={{ projects: panelLayouts.projects.open, selection: panelLayouts.selection.open, notes: panelLayouts.notes.open, tags: panelLayouts.tags.open, chat: panelLayouts.chat.open }}
+        openPanels={{ projects: panelLayouts.projects.open, selection: panelLayouts.selection.open, tags: panelLayouts.tags.open, chat: panelLayouts.chat.open }}
         hasSource={Boolean(source)}
         dark={dark}
         annotationActive={annotationMode}
-        labels={{ openFile: t('openFile'), selection: t('selection'), conversations: t('conversations'), light: t('light'), dark: t('dark'), settings: t('settings') }}
-        onOpenFile={openFile}
+        labels={{ selection: t('selection'), conversations: t('conversations'), light: t('light'), dark: t('dark'), settings: t('settings') }}
         onTogglePanel={togglePanel}
         onToggleAnnotation={toggleAnnotationMode}
         onToggleTheme={() => setDark((value) => !value)}
         onOpenSettings={openSettings}
         onPanelOrderChange={updatePanelOrder}
+        side={activitySide}
+        onSideChange={setActivitySide}
       />
       <main className="workspace" style={{ '--selection-width': `${leftPanelIds.length ? leftDockWidth : 0}px`, '--ai-width': `${rightPanelIds.length ? rightDockWidth : 0}px` } as CSSProperties}>
         {leftPanelIds.length > 0 && <div className="dock-column dock-column-left">{renderDockPanels(leftPanelIds)}<div className="panel-resizer right" onPointerDown={(event) => startResize('left', leftDockWidth, event)} /></div>}
 
         <section className="reader-pane">
-          {!source ? <div className="empty-reader"><img src="/app-icon.svg" alt="Raid" /><p>打开或新建一个项目</p></div> : <>
+          {!source ? <div className="empty-reader"><img src="/app-icon.svg" alt="Raid" /><p>{t('emptyReaderPrompt')}</p></div> : <>
             <div className="reader-toolbar">
               <div className="reader-status-group">
                 {annotationMode ? <div className="annotation-tools" role="toolbar" aria-label="批注工具">
@@ -1497,7 +1649,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           languages={getLanguagePacks()}
           memorySettings={memorySettings}
           userMemory={userMemory}
-          projects={projectMemories}
+          quickOpenEnabled={quickOpenEnabled}
           onClose={() => setSettingsOpen(false)}
           onImportSkill={importSkillFolder}
           onRemoveSkill={removeSkill}
@@ -1505,7 +1657,16 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           onLanguageChange={changeLanguage}
           onMemorySettingsChange={changeMemorySettings}
           onUserMemoryChange={changeUserMemory}
-          onDeleteProject={deleteProject}
+          onQuickOpenChange={async (enabled) => {
+            setQuickOpenEnabled(enabled)
+            try {
+              const next = await window.readingAssistant?.setQuickOpenEnabled(enabled)
+              setQuickOpenEnabled(Boolean(next))
+            } catch (reason) {
+              setQuickOpenEnabled(!enabled)
+              setError(reason instanceof Error ? reason.message : '无法更新右键快捷打开设置。')
+            }
+          }}
           onSave={(config) => {
             setAiConfig(config)
             if (!config.reasoningEnabled) setDeepThinking(false)

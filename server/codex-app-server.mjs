@@ -54,7 +54,7 @@ class CodexAppServer {
     child.once('exit', (code) => this.failAll(new Error(this.stderr.trim() || `Codex App Server 已退出（${code ?? 'unknown'}）`)))
     this.reader = readline.createInterface({ input: child.stdout })
     this.reader.on('line', (line) => this.onLine(line))
-    await this.request('initialize', { clientInfo: { name: 'raid_reader', title: 'Raid', version: '1.3.0' } }, false)
+    await this.request('initialize', { clientInfo: { name: 'raid_reader', title: 'Raid', version: '2.0.0' } }, false)
     this.notify('initialized', {})
   }
 

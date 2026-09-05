@@ -6,12 +6,57 @@ import { analyzePageLayout, stableTextHash, type LayoutWord } from '../services/
 GlobalWorkerOptions.workerSrc = workerUrl
 export { stableTextHash }
 export type DocumentReference = { page: number; region: NormalizedRegion; text?: string }
+export type PdfExtractionOptions = { signal?: AbortSignal; priorityPage?: number; batchSize?: number }
+const loadingTasks = new WeakMap<PDFDocumentProxy, ReturnType<typeof getDocument>>()
 
-export async function loadPdf(url: string): Promise<PDFDocumentProxy> { return getDocument({ url }).promise }
+const abortError = () => new DOMException('PDF indexing was cancelled', 'AbortError')
+const yieldForReading = (signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+  if (signal?.aborted) return reject(abortError())
+  const finish = () => signal?.aborted ? reject(abortError()) : resolve()
+  if ('requestIdleCallback' in globalThis) globalThis.requestIdleCallback(() => finish(), { timeout: 120 })
+  else globalThis.setTimeout(finish, 16)
+})
 
-export async function extractPdfParagraphs(pdf: PDFDocumentProxy, projectId: string, fileId: string, onProgress?: (done: number, total: number) => void) {
+const prioritizedPages = (total: number, priorityPage = 1) => {
+  const center = Math.max(1, Math.min(total, Math.round(priorityPage)))
+  const pages: number[] = [center]
+  for (let distance = 1; pages.length < total; distance += 1) {
+    if (center + distance <= total) pages.push(center + distance)
+    if (center - distance >= 1) pages.push(center - distance)
+  }
+  return pages
+}
+
+export async function loadPdf(url: string): Promise<PDFDocumentProxy> {
+  const task = getDocument({
+    url,
+    cMapUrl: '/pdfjs-assets/cmaps/',
+    cMapPacked: true,
+    standardFontDataUrl: '/pdfjs-assets/standard_fonts/',
+    wasmUrl: '/pdfjs-assets/wasm/',
+    useSystemFonts: true,
+    enableXfa: false,
+    disableAutoFetch: true,
+    rangeChunkSize: 262_144,
+  })
+  const document = await task.promise
+  loadingTasks.set(document, task)
+  return document
+}
+
+export function destroyPdf(document: PDFDocumentProxy) {
+  const task = loadingTasks.get(document)
+  loadingTasks.delete(document)
+  return task ? task.destroy() : document.cleanup()
+}
+
+export async function extractPdfParagraphs(pdf: PDFDocumentProxy, projectId: string, fileId: string, onProgress?: (done: number, total: number) => void, options: PdfExtractionOptions = {}) {
   const output: DocumentParagraph[] = []
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+  const pages = prioritizedPages(pdf.numPages, options.priorityPage)
+  const batchSize = Math.max(1, options.batchSize || 4)
+  for (let index = 0; index < pages.length; index += 1) {
+    if (options.signal?.aborted) throw abortError()
+    const pageNumber = pages[index]
     const page = await pdf.getPage(pageNumber)
     const viewport = page.getViewport({ scale: 1 })
     const content = await page.getTextContent()
@@ -25,10 +70,10 @@ export async function extractPdfParagraphs(pdf: PDFDocumentProxy, projectId: str
     for (const paragraph of analyzePageLayout(words, viewport.width, viewport.height)) {
       output.push({ id: `${fileId}:p${pageNumber}:${stableTextHash(`${paragraph.textHash}:${paragraph.region.left.toFixed(4)}:${paragraph.region.top.toFixed(4)}`)}`, projectId, fileId, page: pageNumber, ...paragraph, order: output.length })
     }
-    page.cleanup(); onProgress?.(pageNumber, pdf.numPages)
-    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0))
+    page.cleanup(); onProgress?.(index + 1, pdf.numPages)
+    if ((index + 1) % batchSize === 0) await yieldForReading(options.signal)
   }
-  return output
+  return output.sort((a, b) => a.page - b.page || a.region.top - b.region.top || a.region.left - b.region.left).map((paragraph, order) => ({ ...paragraph, order }))
 }
 
 export async function extractPdfText(pdf: PDFDocumentProxy, onProgress?: (done: number, total: number) => void, maximumCharacters = Number.POSITIVE_INFINITY) {

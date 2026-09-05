@@ -1,10 +1,10 @@
-import { Bot, BrainCircuit, CheckCircle2, CircleHelp, Database, Eye, EyeOff, FolderOpen, Languages, LoaderCircle, Puzzle, Settings2, Trash2, X } from 'lucide-react'
+import { Bot, CheckCircle2, CircleHelp, Eye, EyeOff, FolderOpen, Languages, LoaderCircle, Puzzle, Settings2, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { LanguagePack } from '../i18n'
 import { useI18n, type AppLanguage } from '../i18n'
-import type { AiConfig, ImportedSkill, MemorySettings, ProjectSummary } from '../types'
+import type { AiConfig, ImportedSkill, MemorySettings } from '../types'
 
-type SettingsTab = 'models' | 'skills' | 'memory' | 'language'
+type SettingsTab = 'models' | 'advanced' | 'general'
 
 type Props = {
   value: AiConfig
@@ -14,7 +14,7 @@ type Props = {
   languages: LanguagePack[]
   memorySettings: MemorySettings
   userMemory: string
-  projects: ProjectSummary[]
+  quickOpenEnabled: boolean
   onClose: () => void
   onSave: (config: AiConfig) => void
   onImportSkill: () => Promise<boolean>
@@ -23,10 +23,10 @@ type Props = {
   onLanguageChange: (language: AppLanguage) => void
   onMemorySettingsChange: (settings: MemorySettings) => void
   onUserMemoryChange: (memory: string) => void
-  onDeleteProject: (id: string) => Promise<void>
+  onQuickOpenChange: (enabled: boolean) => Promise<void> | void
 }
 
-export default function AiSettingsModal({ value, serverConfigured, skills, language, languages, memorySettings, userMemory, projects, onClose, onSave, onImportSkill, onRemoveSkill, onImportLanguage, onLanguageChange, onMemorySettingsChange, onUserMemoryChange, onDeleteProject }: Props) {
+export default function AiSettingsModal({ value, serverConfigured, skills, language, languages, memorySettings, userMemory, quickOpenEnabled, onClose, onSave, onImportSkill, onRemoveSkill, onImportLanguage, onLanguageChange, onMemorySettingsChange, onUserMemoryChange, onQuickOpenChange }: Props) {
   const { t, pack } = useI18n()
   const [tab, setTab] = useState<SettingsTab>('models')
   const [draft, setDraft] = useState(value)
@@ -180,10 +180,9 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
     <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div className="settings-heading"><div className="settings-icon"><Settings2 size={20} /></div><div><h2 id="settings-title">{t('settingsTitle')}</h2></div><button className="icon-button" onClick={onClose} aria-label={t('close')}><X size={18} /></button></div>
       <nav className="settings-tabs">
-        <button className={tab === 'models' ? 'active' : ''} onClick={() => { setTab('models'); setMessage(null) }}><Bot size={15} />{t('modelSettings')}</button>
-        <button className={tab === 'skills' ? 'active' : ''} onClick={() => { setTab('skills'); setMessage(null) }}><Puzzle size={15} />{t('skillSettings')}</button>
-        <button className={tab === 'memory' ? 'active' : ''} onClick={() => { setTab('memory'); setMessage(null) }}><BrainCircuit size={15} />{t('memorySettings')}</button>
-        <button className={tab === 'language' ? 'active' : ''} onClick={() => { setTab('language'); setMessage(null) }}><Languages size={15} />{t('languageSettings')}</button>
+        <button className={tab === 'models' ? 'active' : ''} onClick={() => { setTab('models'); setMessage(null) }}><Bot size={15} />{pack.code === 'en-US' ? 'Models' : '模型'}</button>
+        <button className={tab === 'advanced' ? 'active' : ''} onClick={() => { setTab('advanced'); setMessage(null) }}><SlidersHorizontal size={15} />{pack.code === 'en-US' ? 'Advanced' : '高级'}</button>
+        <button className={tab === 'general' ? 'active' : ''} onClick={() => { setTab('general'); setMessage(null) }}><Languages size={15} />{pack.code === 'en-US' ? 'General' : '通用'}</button>
       </nav>
 
       <div className="settings-body">
@@ -222,22 +221,21 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
           </>}
         </>}
 
-        {tab === 'skills' && <section className="import-settings"><div className="import-header"><div><h3>{t('skillSettings')}</h3><p>{t('skillImportHelp')}</p></div><button className="import-button" disabled={importing} onClick={() => runImport('skill')}>{importing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{t('importSkill')}</button></div>
+        {tab === 'advanced' && <div className="advanced-settings"><section className="import-settings"><div className="import-header"><div><h3>{t('skillSettings')}</h3><p>{t('skillImportHelp')}</p></div><button className="import-button" disabled={importing} onClick={() => runImport('skill')}>{importing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{t('importSkill')}</button></div>
           <div className="import-list">{skills.length ? skills.map((skill) => <article key={skill.id} className="import-card"><div><strong>{skill.name}</strong><code>/{skill.command}</code><p>{skill.description}</p><small>{skill.sourcePath}</small></div><button onClick={() => onRemoveSkill(skill.id)} title={t('removeSkill')}><Trash2 size={15} /></button></article>) : <div className="import-empty"><Puzzle size={24} /><p>{t('noSkills')}</p></div>}</div>
-        </section>}
+        </section>
 
-        {tab === 'memory' && <section className="memory-settings">
-          <section className="project-memory-list"><div className="memory-section-heading"><span>{pack.code === 'en-US' ? 'Projects' : '项目数据'} · {projects.length}</span></div><div className="memory-file-list">{projects.map((project) => <article key={project.id}><Database size={15} /><div><strong>{project.name}</strong><small>{project.fileCount} 个文件 · {project.conversationCount} {t('memoryConversations')} · {new Date(project.updatedAt).toLocaleString()}</small></div><button onClick={() => { if (window.confirm(pack.code === 'en-US' ? 'Permanently delete this project and every related file, note, tag, annotation and index?' : '永久删除该项目以及全部文件、笔记、标签、批注和索引？')) void onDeleteProject(project.id) }}><Trash2 size={14} /></button></article>)}</div></section>
+        <section className="memory-settings">
           <section className="memory-card">
             <label className="vision-toggle"><input type="checkbox" checked={memorySettings.userMemoryEnabled} onChange={(event) => onMemorySettingsChange({ ...memorySettings, userMemoryEnabled: event.target.checked })} /><span className="vision-switch" aria-hidden="true" /><span><strong>{t('userMemory')}</strong><small>{t('userMemoryHelp')}</small></span></label>
             <textarea className="user-memory-editor" value={userMemory} onChange={(event) => onUserMemoryChange(event.target.value)} placeholder={t('userMemoryPlaceholder')} />
             <div className="memory-editor-footer"><small>{userMemory.length} / 12000</small>{userMemory && <button onClick={() => { if (window.confirm(t('confirmClearUserMemory'))) onUserMemoryChange('') }}><Trash2 size={13} />{t('clearUserMemory')}</button>}</div>
           </section>
-        </section>}
+        </section></div>}
 
-        {tab === 'language' && <section className="import-settings"><div className="import-header"><div><h3>{t('languageSettings')}</h3><p>{t('languageImportHelp')}</p></div><button className="import-button" disabled={importing} onClick={() => runImport('language')}>{importing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{t('importLanguage')}</button></div>
+        {tab === 'general' && <div className="general-settings"><section className="import-settings"><div className="import-header"><div><h3>{t('languageSettings')}</h3><p>{t('languageImportHelp')}</p></div><button className="import-button" disabled={importing} onClick={() => runImport('language')}>{importing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{t('importLanguage')}</button></div>
           <div className="language-list">{languages.map((item) => <button key={item.code} className={language === item.code ? 'active' : ''} onClick={() => onLanguageChange(item.code)}><span>{item.label}</span><small>{item.code}</small>{language === item.code && <CheckCircle2 size={16} />}</button>)}</div>
-        </section>}
+        </section><section className="memory-card quick-open-card"><label className="vision-toggle"><input type="checkbox" checked={quickOpenEnabled} disabled={!window.readingAssistant} onChange={(event) => void onQuickOpenChange(event.target.checked)} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Open with Raid' : '右键使用 Raid 打开'}</strong><small>{pack.code === 'en-US' ? 'Adds an “Open with Raid” item to the Windows file context menu.' : '在 Windows 文件右键菜单中添加“使用 Raid 打开”。卸载时会自动清理。'}</small></span></label></section></div>}
 
         {message && <div className={`settings-message ${message.type}`}>{message.type === 'ok' ? <CheckCircle2 size={15} /> : <X size={15} />}<span>{message.text}</span></div>}
       </div>

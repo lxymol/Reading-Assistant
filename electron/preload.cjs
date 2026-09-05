@@ -12,6 +12,14 @@ contextBridge.exposeInMainWorld('readingAssistant', {
   deleteProject: (id) => ipcRenderer.invoke('reading-assistant:delete-project', id),
   deleteProjectFile: (projectId, fileId) => ipcRenderer.invoke('reading-assistant:delete-project-file', projectId, fileId),
   openExternal: (url) => ipcRenderer.invoke('reading-assistant:open-external', url),
+  getQuickOpenEnabled: () => ipcRenderer.invoke('reading-assistant:get-quick-open-enabled'),
+  setQuickOpenEnabled: (enabled) => ipcRenderer.invoke('reading-assistant:set-quick-open-enabled', enabled),
+  takePendingOpenFiles: () => ipcRenderer.invoke('reading-assistant:take-pending-open-files'),
+  onOpenFile: (listener) => {
+    const wrapped = (_event, file) => listener(file)
+    ipcRenderer.on('reading-assistant:open-file', wrapped)
+    return () => ipcRenderer.removeListener('reading-assistant:open-file', wrapped)
+  },
   movePanelWindow: (id, x, y) => ipcRenderer.send('reading-assistant:move-panel-window', { id, x, y }),
   preparePanelDrag: () => ipcRenderer.send('reading-assistant:prepare-panel-drag'),
   setPanelDragging: (active) => ipcRenderer.send('reading-assistant:set-panel-dragging', { active }),

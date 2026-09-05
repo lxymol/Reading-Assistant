@@ -122,10 +122,12 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
     }
     document.body.classList.add('moving-workspace-panel')
     popup?.document.body.classList.add('moving-workspace-panel')
+    dockHintRef.current = null
     if (layout.dock === 'float') {
-      dockHintRef.current = null
       popup?.readingAssistant?.setPanelDragging(true)
       popup?.readingAssistant?.setDockZones(true, null, popup.document.documentElement.dataset.theme === 'dark')
+    } else {
+      window.readingAssistant?.setDockZones(true, null, document.documentElement.dataset.theme === 'dark')
     }
   }
 
@@ -135,13 +137,17 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
     event.preventDefault()
     event.stopPropagation()
     if (Math.hypot(event.screenX - moving.startX, event.screenY - moving.startY) > 4) moving.moved = true
-    if (moving.mode !== 'float' || !moving.moved) return
-    popupRef.current?.readingAssistant?.movePanelWindow(id, moving.x + event.screenX - moving.startX, moving.y + event.screenY - moving.startY)
+    if (!moving.moved) return
+    if (moving.mode === 'float') popupRef.current?.readingAssistant?.movePanelWindow(id, moving.x + event.screenX - moving.startX, moving.y + event.screenY - moving.startY)
     const nextHint = dockAtPointer(event.screenX, event.screenY)
     if (nextHint !== dockHintRef.current) {
       dockHintRef.current = nextHint
-      const panelWindow = popupRef.current
-      panelWindow?.readingAssistant?.setDockZones(true, nextHint, panelWindow.document.documentElement.dataset.theme === 'dark')
+      if (moving.mode === 'float') {
+        const panelWindow = popupRef.current
+        panelWindow?.readingAssistant?.setDockZones(true, nextHint, panelWindow.document.documentElement.dataset.theme === 'dark')
+      } else {
+        window.readingAssistant?.setDockZones(true, nextHint, document.documentElement.dataset.theme === 'dark')
+      }
     }
   }
 
@@ -156,6 +162,7 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
     dockHintRef.current = null
     popupRef.current?.readingAssistant?.setPanelDragging(false)
     popupRef.current?.readingAssistant?.setDockZones(false, null)
+    window.readingAssistant?.setDockZones(false, null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     if (moving.mode === 'float') {
       const targetDock = allowDock ? dockAtPointer(event.screenX, event.screenY) : null

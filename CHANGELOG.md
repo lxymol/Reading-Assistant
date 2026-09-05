@@ -4,6 +4,31 @@ All notable changes to Raid are documented here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-06
+
+### Added
+
+- Added lightweight combinations for organizing files, including drag-to-reorder combinations, drag-to-move files, an always-available ungrouped area, and file conversations nested beneath their source files.
+- Added three explicit AI scopes: selection, current document, and current combination. Document and combination answers use retrieval-ranked, source-linked context, while selection questions can include every active text and visual selection.
+- Added Windows Explorer quick-open integration, configurable from General settings and removed automatically during uninstall.
+- Added multi-file drag, file-picker, and clipboard imports, with serialized ingestion so simultaneous files are retained instead of replacing one another.
+
+### Changed
+
+- Simplified the file sidebar and conversation hierarchy, moved combination creation into the title bar, and made combination names editable by double-clicking.
+- Removed the legacy notes surface and its persisted assets to keep Raid focused on reading, evidence navigation, annotation, and AI conversations.
+- Reworked large-PDF rendering around visible-page virtualization, nearby-page preloading, deferred OCR, and explicit PDF/render-buffer cleanup.
+- Refined tags with independent panel and placement-mode controls, draggable markers, editable labels, theme-aware colors, and inline AI citation badges.
+- Updated docked and floating panel dragging so both states show edge-docking targets consistently.
+
+### Fixed
+
+- Fixed imports into the ungrouped area replacing earlier files and fixed multi-file operating-system drops accepting only one item.
+- Fixed combination rename timing, collapse/expand pointer-down jumps, drag-release jumps, and unstable reorder animation.
+- Fixed duplicate text-highlight layers, recent-tag focus frames, tag-mode state indicators, and stale tag labels in the document.
+- Fixed large PDFs retaining rendered pages and document loading tasks after they moved far off-screen or another file was opened.
+- Fixed Markdown table text in AI replies not following conversation zoom.
+
 ## [1.4.0] - 2026-09-03
 
 ### Added

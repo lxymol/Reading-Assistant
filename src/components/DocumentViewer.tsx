@@ -9,7 +9,7 @@ import rehypeKatex from 'rehype-katex'
 import SelectableCanvas from './SelectableCanvas'
 import AnnotationLayer from './AnnotationLayer'
 import type { AnnotationTool, DocumentAnnotation, DocumentHighlight, DocumentTag, NormalizedRegion, SelectionResult, SourceFile, TextAnnotation } from '../types'
-import { loadPdf, type DocumentReference } from '../lib/pdf'
+import { destroyPdf, loadPdf, type DocumentReference } from '../lib/pdf'
 import { useI18n } from '../i18n'
 
 type Props = {
@@ -37,6 +37,28 @@ type Props = {
 }
 
 type AnnotationPageProps = Pick<Props, 'annotationMode' | 'annotationTool' | 'annotationColor' | 'annotations' | 'onAnnotationsChange'>
+
+type VisibleHighlightRegion = NormalizedRegion & { color: string }
+
+function mergeVisibleHighlightRegions(regions: VisibleHighlightRegion[]) {
+  const sorted = [...regions].sort((first, second) => first.top - second.top || first.left - second.left)
+  return sorted.reduce<VisibleHighlightRegion[]>((merged, current) => {
+    const match = merged.find((existing) => {
+      if (existing.color !== current.color) return false
+      const verticalOverlap = Math.min(existing.top + existing.height, current.top + current.height) - Math.max(existing.top, current.top)
+      const horizontalOverlap = Math.min(existing.left + existing.width, current.left + current.width) - Math.max(existing.left, current.left)
+      return verticalOverlap / Math.max(.000001, Math.min(existing.height, current.height)) >= .65 && horizontalOverlap > 0
+    })
+    if (!match) { merged.push({ ...current }); return merged }
+    const right = Math.max(match.left + match.width, current.left + current.width)
+    const bottom = Math.max(match.top + match.height, current.top + current.height)
+    match.left = Math.min(match.left, current.left)
+    match.top = Math.min(match.top, current.top)
+    match.width = right - match.left
+    match.height = bottom - match.top
+    return merged
+  }, [])
+}
 
 function TagPlacementLayer({ active }: { active: boolean }) {
   if (!active) return null
@@ -97,15 +119,17 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
   const render = useCallback(async (canvas: HTMLCanvasElement) => {
     const page = await pdf.getPage(pageNumber)
     const displayViewport = page.getViewport({ scale: 0.82 * zoom })
-    const outputScale = Math.min(window.devicePixelRatio || 1, 1.6)
+    const requestedScale = Math.min(window.devicePixelRatio || 1, 1.6)
+    const maximumPixels = 16_000_000
+    const outputScale = Math.min(requestedScale, Math.sqrt(maximumPixels / Math.max(1, displayViewport.width * displayViewport.height)))
     const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
     const context = canvas.getContext('2d')
     if (!context) return
-    canvas.width = viewport.width
-    canvas.height = viewport.height
+    canvas.width = Math.max(1, Math.floor(viewport.width))
+    canvas.height = Math.max(1, Math.floor(viewport.height))
     canvas.style.width = `${displayViewport.width}px`
     canvas.style.height = `${displayViewport.height}px`
-    await page.render({ canvasContext: context, viewport, canvas }).promise
+    await page.render({ canvasContext: context, viewport, canvas, intent: 'display' }).promise
   }, [pdf, pageNumber, zoom])
 
   useEffect(() => {
@@ -132,7 +156,7 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     return () => { active = false; layer?.cancel(); container.replaceChildren() }
   }, [pdf, pageNumber, textSelectionEnabled, zoom, highlights])
 
-  const pageRegions = highlights.flatMap((highlight) => (highlight.regions || []).filter((item) => item.page === pageNumber).map((item) => ({ ...item.region, color: highlight.color })))
+  const pageRegions = mergeVisibleHighlightRegions(highlights.flatMap((highlight) => (highlight.regions || []).filter((item) => item.page === pageNumber).map((item) => ({ ...item.region, color: highlight.color }))))
   const focusedRegion = citationFocus?.page === pageNumber ? citationFocus.region : null
   useEffect(() => {
     if (!focusedRegion) return
@@ -173,25 +197,44 @@ function ImagePage({ source, zoom, inverted, tagMode, tags, onMoveTag, ...annota
 
 type PdfPageProps = Parameters<typeof PdfPage>[0]
 
-function LazyPdfPage(props: PdfPageProps) {
+function LazyPdfPage({ priority, ...props }: PdfPageProps & { priority: boolean }) {
   const { pageNumber } = props
-  const placeholderRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(() => pageNumber <= 3)
+  const shellRef = useRef<HTMLDivElement>(null)
+  const [pageSize, setPageSize] = useState({ widthAtZoom1: 500, heightAtZoom1: 710 })
+  const [nearViewport, setNearViewport] = useState(priority)
+  const shouldRender = nearViewport || priority
 
   useEffect(() => {
-    if (visible) return
-    const placeholder = placeholderRef.current
-    if (!placeholder) return
-    const root = placeholder.closest<HTMLElement>('.reader-scroll')
+    const shell = shellRef.current
+    if (!shell) return
+    const root = shell.closest<HTMLElement>('.reader-scroll')
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) setVisible(true)
-    }, { root, rootMargin: '900px 0px' })
-    observer.observe(placeholder)
+      const entry = entries[0]
+      if (!entry) return
+      const renderedPage = shell.querySelector<HTMLElement>('.selectable-page')
+      if (renderedPage) {
+        const bounds = renderedPage.getBoundingClientRect()
+        if (bounds.width > 0 && bounds.height > 0) setPageSize((current) => {
+          const measured = { widthAtZoom1: bounds.width / props.zoom, heightAtZoom1: bounds.height / props.zoom }
+          return Math.abs(current.widthAtZoom1 - measured.widthAtZoom1) < .5 && Math.abs(current.heightAtZoom1 - measured.heightAtZoom1) < .5 ? current : measured
+        })
+      }
+      setNearViewport(entry.isIntersecting)
+    }, { root, rootMargin: '1200px 0px' })
+    observer.observe(shell)
     return () => observer.disconnect()
-  }, [visible])
+  }, [props.zoom])
 
-  if (visible) return <PdfPage {...props} />
-  return <div ref={placeholderRef} className="pdf-page-placeholder" data-page-number={pageNumber} style={{ width: 500 * props.zoom, height: 710 * props.zoom }}><span>{pageNumber}</span></div>
+  useEffect(() => {
+    if (shouldRender) return
+    void props.pdf.getPage(pageNumber).then((page) => page.cleanup()).catch(() => undefined)
+  }, [pageNumber, props.pdf, shouldRender])
+
+  return <div ref={shellRef} className="lazy-pdf-page">
+    {shouldRender
+      ? <PdfPage {...props} />
+      : <div className="pdf-page-placeholder" data-page-number={pageNumber} style={{ width: pageSize.widthAtZoom1 * props.zoom, height: pageSize.heightAtZoom1 * props.zoom }}><span>{pageNumber}</span></div>}
+  </div>
 }
 
 const contextSafe = (canvas: HTMLCanvasElement) => canvas.getContext('2d')
@@ -242,9 +285,20 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
   const translationControllerRef = useRef<AbortController | null>(null)
   useEffect(() => {
     if (source.kind !== 'pdf') return
+    let active = true
+    let opened: PDFDocumentProxy | null = null
     loadPdf(source.url)
-      .then((document) => { setPdf(document); onPdfReady(document) })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : (pack.code === 'en-US' ? 'Failed to load PDF' : 'PDF 加载失败')))
+      .then((document) => {
+        opened = document
+        if (!active) return void destroyPdf(document)
+        setPdf(document); onPdfReady(document)
+      })
+      .catch((reason) => active && setError(reason instanceof Error ? reason.message : (pack.code === 'en-US' ? 'Failed to load PDF' : 'PDF 加载失败')))
+    return () => {
+      active = false
+      const document = opened
+      if (document) window.setTimeout(() => void destroyPdf(document), 0)
+    }
   }, [source, onPdfReady, pack.code])
 
   useEffect(() => {
@@ -534,7 +588,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
         ? <ImagePage source={source} zoom={zoom} inverted={inverted} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         : pdf && Array.from({ length: pdf.numPages }, (_, index) => {
           const pageNumber = index + 1
-          return <LazyPdfPage key={pageNumber} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
+          return <LazyPdfPage key={pageNumber} priority={Math.abs(pageNumber - currentPage) <= 2} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         })}
       {selectionRect && <div className="document-selection-rect" style={selectionRect} />}
       {textActionPopover && createPortal(textActionPopover, document.body)}

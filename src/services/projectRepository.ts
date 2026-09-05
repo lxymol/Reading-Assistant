@@ -5,7 +5,8 @@ const projectStore = 'projects'
 const sourceStore = 'sources'
 
 const persistedProject = (project: RuntimeProject | Project): Project => {
-  const { files, ...metadata } = project
+  const { files, ...metadata } = project as (RuntimeProject | Project) & { projectNotes?: string; projectNoteAssets?: Record<string, string> }
+  delete metadata.projectNotes; delete metadata.projectNoteAssets
   return {
     ...metadata,
     files: files.map((file) => {

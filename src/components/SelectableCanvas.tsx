@@ -22,6 +22,7 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
   const [rect, setRect] = useState<Rect | null>(null)
   const [rendering, setRendering] = useState(true)
   const [renderError, setRenderError] = useState('')
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -44,8 +45,12 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
       })
       .catch((reason) => active && setRenderError(reason instanceof Error ? reason.message : '页面渲染失败'))
       .finally(() => active && setRendering(false))
-    return () => { active = false }
-  }, [render])
+    return () => {
+      active = false
+      buffer.width = 0
+      buffer.height = 0
+    }
+  }, [render, retry])
 
   const pointFromEvent = (event: ReactPointerEvent) => {
     const bounds = event.currentTarget.getBoundingClientRect()
@@ -137,7 +142,7 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
       <canvas ref={canvasRef} />
       {overlay}
       {rendering && <div className="page-loader"><span /></div>}
-      {renderError && <div className="canvas-error">选区处理失败：{renderError}</div>}
+      {renderError && <div className="canvas-error">页面渲染失败：{renderError}<button onClick={(event) => { event.stopPropagation(); setRetry((value) => value + 1) }}>重试</button></div>}
       {rect && <div className="selection-rect" style={rect} />}
       <div className="page-number">{pageNumber}</div>
     </div>

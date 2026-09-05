@@ -65,6 +65,37 @@ app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
 const internalPort = isDevelopmentInstance ? 18788 : 18787
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
+const contextMenuKey = 'HKCU\\Software\\Classes\\*\\shell\\Raid'
+const pendingOpenPaths = []
+
+function candidateOpenPaths(argv) {
+  return argv.filter((value) => typeof value === 'string' && !value.startsWith('-')).map((value) => path.resolve(value)).filter((value) => fs.existsSync(value) && fs.statSync(value).isFile())
+}
+pendingOpenPaths.push(...candidateOpenPaths(process.argv.slice(1)))
+
+function openFilePayload(filePath) {
+  const extension = path.extname(filePath).toLowerCase()
+  const type = extension === '.pdf' ? 'application/pdf' : ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif'].includes(extension) ? `image/${extension === '.jpg' ? 'jpeg' : extension.slice(1)}` : 'application/octet-stream'
+  const stats = fs.statSync(filePath)
+  return { name: path.basename(filePath), type, lastModified: stats.mtimeMs, data: new Uint8Array(fs.readFileSync(filePath)) }
+}
+
+async function quickOpenEnabled() {
+  if (process.platform !== 'win32') return false
+  try { await execFileAsync('reg.exe', ['QUERY', contextMenuKey]); return true } catch { return false }
+}
+
+async function setQuickOpenEnabled(enabled) {
+  if (process.platform !== 'win32') return false
+  if (!enabled) {
+    try { await execFileAsync('reg.exe', ['DELETE', contextMenuKey, '/f']) } catch { /* Already disabled. */ }
+    return false
+  }
+  await execFileAsync('reg.exe', ['ADD', contextMenuKey, '/ve', '/d', '使用 Raid 打开', '/f'])
+  const command = app.isPackaged ? `"${process.execPath}" "%1"` : `"${process.execPath}" "${applicationDirectory}" "%1"`
+  await execFileAsync('reg.exe', ['ADD', `${contextMenuKey}\\command`, '/ve', '/d', command, '/f'])
+  return true
+}
 
 function logStartup(message) {
   try {
@@ -257,29 +288,6 @@ function writeJsonAtomically(filePath, value) {
   fs.renameSync(temporaryPath, filePath)
 }
 
-function writeAssetMap(directory, assets = {}) {
-  fs.rmSync(directory, { recursive: true, force: true })
-  fs.mkdirSync(directory, { recursive: true })
-  const manifest = {}
-  for (const [id, value] of Object.entries(assets || {})) {
-    const match = String(value).match(/^data:([^;,]+);base64,(.+)$/s)
-    if (!match) continue
-    const fileName = `${createHash('sha256').update(id).digest('hex')}.bin`
-    fs.writeFileSync(path.join(directory, fileName), Buffer.from(match[2], 'base64'))
-    manifest[id] = { fileName, mime: match[1] }
-  }
-  return manifest
-}
-
-function readAssetMap(directory, manifest = {}) {
-  const assets = {}
-  for (const [id, item] of Object.entries(manifest || {})) {
-    const assetPath = path.join(directory, path.basename(String(item?.fileName || '')))
-    if (fs.existsSync(assetPath)) assets[id] = `data:${item?.mime || 'application/octet-stream'};base64,${fs.readFileSync(assetPath).toString('base64')}`
-  }
-  return assets
-}
-
 function projectSummary(record) {
   return { id: record.id, name: record.name, fileCount: Array.isArray(record.fileOrder) ? record.fileOrder.length : 0, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : 0, updatedAt: record.updatedAt, activeFileId: record.activeFileId || null }
 }
@@ -290,7 +298,7 @@ function readProjectRecord(id) {
   if (!fs.existsSync(metadataPath)) return null
   const stored = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
   if (stored.kind !== 'raid-project' || Number(stored.schemaVersion) !== storageSchemaVersion) return null
-  const { schemaVersion: _schemaVersion, kind: _kind, fileOrder = [], projectAssetManifest, ...project } = stored
+  const { schemaVersion: _schemaVersion, kind: _kind, fileOrder = [], projectAssetManifest: _projectAssetManifest, ...project } = stored
   const files = fileOrder.flatMap((fileId) => {
     const fileDirectory = projectFileDirectory(id, fileId)
     const filePath = path.join(fileDirectory, 'file.json')
@@ -301,7 +309,8 @@ function readProjectRecord(id) {
     const { assetManifest: _assetManifest, fileNotes: _fileNotes, fileNoteAssets: _fileNoteAssets, ...file } = value
     return [{ ...file, paragraphs: Array.isArray(index.paragraphs) ? index.paragraphs : [], indexState: index.indexState || file.indexState }]
   })
-  return { ...project, files, projectNoteAssets: readAssetMap(path.join(directory, 'resources'), projectAssetManifest) }
+  const { projectNotes: _projectNotes, projectNoteAssets: _projectNoteAssets, ...withoutLegacyNotes } = project
+  return { ...withoutLegacyNotes, files }
 }
 
 function listProjectSummaries() {
@@ -322,8 +331,8 @@ function saveProjectRecord(payload) {
   if (!payload || typeof payload !== 'object' || typeof payload.id !== 'string' || !Array.isArray(payload.files)) throw new Error('INVALID_PROJECT_RECORD')
   const directory = projectDataDirectory(payload.id)
   fs.mkdirSync(path.join(directory, 'files'), { recursive: true })
-  const { files, projectNoteAssets, ...project } = payload
-  const projectAssetManifest = writeAssetMap(path.join(directory, 'resources'), projectNoteAssets)
+  const { files, projectNotes: _projectNotes, projectNoteAssets: _projectNoteAssets, ...project } = payload
+  fs.rmSync(path.join(directory, 'resources'), { recursive: true, force: true })
   for (const value of files) {
     if (!value || value.projectId !== payload.id || typeof value.id !== 'string') throw new Error('INVALID_PROJECT_FILE')
     const fileDirectory = projectFileDirectory(payload.id, value.id)
@@ -332,7 +341,7 @@ function saveProjectRecord(payload) {
     writeJsonAtomically(path.join(fileDirectory, 'file.json'), file)
     writeJsonAtomically(path.join(fileDirectory, 'index.json'), { indexState: file.indexState, paragraphs })
   }
-  const record = { schemaVersion: storageSchemaVersion, kind: 'raid-project', ...project, fileOrder: files.map((file) => file.id), projectAssetManifest }
+  const record = { schemaVersion: storageSchemaVersion, kind: 'raid-project', ...project, fileOrder: files.map((file) => file.id) }
   writeJsonAtomically(path.join(directory, 'project.json'), record)
   writeJsonAtomically(path.join(directory, 'summary.json'), { schemaVersion: storageSchemaVersion, ...projectSummary(record) })
   writeDataManifest()
@@ -383,6 +392,9 @@ ipcMain.handle('reading-assistant:open-external', async (_event, value) => {
   await shell.openExternal(url.href)
   return true
 })
+ipcMain.handle('reading-assistant:get-quick-open-enabled', () => quickOpenEnabled())
+ipcMain.handle('reading-assistant:set-quick-open-enabled', (_event, enabled) => setQuickOpenEnabled(Boolean(enabled)))
+ipcMain.handle('reading-assistant:take-pending-open-files', () => pendingOpenPaths.splice(0).flatMap((filePath) => { try { return [openFilePayload(filePath)] } catch { return [] } }))
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)
   return mainWindow && panelWindow && !panelWindow.isDestroyed() && panelWindow.getParentWindow() === mainWindow ? panelWindow : null
@@ -487,7 +499,10 @@ ipcMain.on('reading-assistant:set-panel-dragging', (event, payload) => {
   if (lockedBounds) panelPreparedBounds.set(panelWindow, lockedBounds)
 })
 ipcMain.on('reading-assistant:set-dock-zones', (event, payload) => {
-  if (!getPanelWindow(event.sender)) return
+  const senderWindow = BrowserWindow.fromWebContents(event.sender)
+  const trustedSender = senderWindow && mainWindow && !senderWindow.isDestroyed()
+    && (senderWindow === mainWindow || senderWindow.getParentWindow() === mainWindow)
+  if (!trustedSender) return
   const active = payload?.active === 'left' || payload?.active === 'right' ? payload.active : null
   setDockZones(Boolean(payload?.visible), active, Boolean(payload?.dark))
 })
@@ -567,7 +582,13 @@ async function createWindow() {
 if (!hasSingleInstanceLock) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    const paths = candidateOpenPaths(argv.slice(1))
+    for (const filePath of paths) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try { mainWindow.webContents.send('reading-assistant:open-file', openFilePayload(filePath)) } catch { pendingOpenPaths.push(filePath) }
+      } else pendingOpenPaths.push(filePath)
+    }
     if (!mainWindow) return
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
