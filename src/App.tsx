@@ -13,7 +13,7 @@ import ProjectExplorer from './components/ProjectExplorer'
 import TagPanel from './components/TagPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import type { DocumentReference } from './lib/pdf'
-import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, DocumentTag, ImportedSkill, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
+import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, DocumentParagraph, DocumentTag, ImportedSkill, IndexState, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
 import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadSkills, loadUserMemory } from './lib/preferences'
@@ -36,7 +36,7 @@ const makeId = () => crypto.randomUUID()
 const coolProject = (project: RuntimeProject): RuntimeProject => ({
   ...project,
   hydrated: false,
-  files: project.files.map((file) => ({ ...file, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false })),
+  files: project.files.map((file) => ({ ...file, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false, indexLoaded: false })),
   conversations: project.conversations.map((conversation) => ({ ...conversation, history: [] })),
 })
 const nextPanelZ = (items: Record<PanelId, PanelLayout>) => Math.max(40, ...Object.values(items).map((item) => item.z)) + 1
@@ -68,9 +68,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [selectedText, setSelectedText] = useState('')
   const [selections, setSelections] = useState<CapturedSelection[]>([])
-  const [initialConversationId] = useState<string>(() => makeId())
-  const [conversations, setConversations] = useState<Conversation[]>(() => [{ id: initialConversationId, title: t('untitledConversation'), history: [] }])
-  const [activeConversationId, setActiveConversationId] = useState(initialConversationId)
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [activeConversationId, setActiveConversationId] = useState('')
   const [history, setHistory] = useState<ChatMessage[]>([])
   const [customPrompt, setCustomPrompt] = useState('')
   const [zoom, setZoom] = useState(1)
@@ -91,6 +90,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [fileDragActive, setFileDragActive] = useState(false)
   const [aiTasks, setAiTasks] = useState<Set<string>>(() => new Set())
   const [progress, setProgress] = useState('')
+  const indexTasksRef = useRef(new Map<string, Promise<{ paragraphs: DocumentParagraph[]; state: IndexState }>>())
   const recognize = useOcr(setProgress)
   const [error, setError] = useState('')
   const [configured, setConfigured] = useState<boolean | null>(null)
@@ -399,7 +399,9 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const snapshotCurrent = useCallback((): RuntimeProject | null => {
     if (!activeProjectId) return null
     const project = projects.find((item) => item.id === activeProjectId)
-    if (!project) return null
+    // Lightweight sidebar records intentionally omit indexes and histories.
+    // Never promote or persist one as a complete project snapshot.
+    if (!project?.hydrated) return null
     const syncedConversations = conversations.map((item) => item.id === activeConversationId ? { ...item, history } : item)
     return {
       ...project,
@@ -409,7 +411,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         highlights, annotations, updatedAt: Date.now(),
       } : file),
       conversations: syncedConversations, activeConversationId, activeFileId,
-      updatedAt: Date.now(), hydrated: true,
+      updatedAt: Date.now(),
     }
   }, [activeProjectId, projects, conversations, activeConversationId, history, activeFileId, currentPage, zoom, highlights, annotations])
 
@@ -444,14 +446,25 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     pendingPageRestoreRef.current = file?.readingState.page || 1
   }
 
-  const hydrateProject = async (project: RuntimeProject) => {
-    if (project.hydrated) return project
-    const stored = await projectRepository.get(project.id)
+  const hydrateProject = async (project: RuntimeProject, indexFileId: string | null = null) => {
+    const hasRequestedIndexes = indexFileId
+      ? project.files.find((file) => file.id === indexFileId)?.indexLoaded !== false
+      : project.files.every((file) => file.indexLoaded !== false)
+    if (project.hydrated && hasRequestedIndexes) return project
+    const stored = await projectRepository.get(project.id, false, indexFileId)
     if (!stored) throw new Error(pack.code === 'en-US' ? 'The combination is missing.' : '组合数据缺失。')
     const withoutLegacyNotes = { ...stored } as typeof stored & { projectNotes?: string; projectNoteAssets?: Record<string, string> }
     delete withoutLegacyNotes.projectNotes
     delete withoutLegacyNotes.projectNoteAssets
-    return { ...withoutLegacyNotes, isLoose: stored.id === looseFilesId || stored.isLoose, files: stored.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true } as RuntimeProject
+    const currentFiles = new Map(project.files.map((file) => [file.id, file]))
+    const files = stored.files.map((file) => {
+      const current = currentFiles.get(file.id)
+      if (!current || !project.hydrated) return { ...file, sourceLoaded: false } as RuntimeProjectFile
+      const loaded = (file as RuntimeProjectFile).indexLoaded !== false
+      if (indexFileId && file.id !== indexFileId) return { ...file, ...current, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false, indexLoaded: false }
+      return { ...file, ...current, paragraphs: loaded ? file.paragraphs : current.paragraphs, indexState: loaded ? file.indexState : current.indexState, indexLoaded: loaded || current.indexLoaded !== false }
+    })
+    return { ...withoutLegacyNotes, ...(project.hydrated ? project : {}), isLoose: stored.id === looseFilesId || stored.isLoose, files, hydrated: true } as RuntimeProject
   }
 
   const hydrateProjectFile = async (project: RuntimeProject, fileId: string) => {
@@ -471,7 +484,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     let project = snapshot?.id === projectId ? snapshot : projects.find((item) => item.id === projectId)
     if (!project) return false
     try {
-      project = await hydrateProject(project)
+      if (snapshot?.id === projectId) await projectRepository.save(snapshot)
+      project = await hydrateProject(project, fileId)
       const hydrated = await hydrateProjectFile(project, fileId)
       project = { ...hydrated.project, activeFileId: fileId }
       setProjects((items) => items.map((item) => item.id === projectId ? project! : snapshot && item.id === snapshot.id ? coolProject(snapshot) : item))
@@ -486,8 +500,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const candidate = projects.find((item) => item.id === id)
     if (!candidate) return
     try {
-      const project = await hydrateProject(candidate)
-      const fileId = project.activeFileId || project.files[0]?.id || null
+      const fileId = candidate.activeFileId || candidate.files[0]?.id || null
+      const project = await hydrateProject(candidate, fileId)
       if (fileId) await openProjectFile(id, fileId)
       else {
         const snapshot = snapshotCurrent()
@@ -516,7 +530,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const residentProject = projectsRef.current.find((item) => item.id === destinationId)
     const residentHasNewerFiles = Boolean(snapshot?.id === destinationId && residentProject?.files.some((file) => !snapshot.files.some((item) => item.id === file.id)))
     let project = snapshot?.id === destinationId && !residentHasNewerFiles ? snapshot : residentProject
-    if (project && !project.hydrated) project = await hydrateProject(project)
+    if (project && !project.hydrated) project = await hydrateProject(project, project.activeFileId || project.files[0]?.id || null)
     if (!project) {
       const now = Date.now()
       project = { id: looseFilesId, name: '未分组文件', isLoose: true, files: [], conversations: [], activeConversationId: '', activeFileId: null, tags: [], createdAt: now, updatedAt: now, hydrated: true }
@@ -559,11 +573,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         id: fileId, projectId: project.id, name: readableFile.name, kind: fileKind, type: readableFile.type || (fileKind === 'pdf' ? 'application/pdf' : 'application/octet-stream'),
         size: readableFile.size, lastModified: readableFile.lastModified, createdAt: now, updatedAt: now,
         readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], paragraphs: [],
-        indexState: { status: 'pending', version: documentIndexVersion },
+        indexState: { status: 'pending', version: documentIndexVersion }, indexLoaded: true,
         source: { name: readableFile.name, kind: fileKind, url: URL.createObjectURL(readableFile), file: readableFile }, pdf: null, sourceLoaded: true,
       }
-      const fileConversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId, contextScope: 'file' }
-      project = { ...project, files: [...project.files, projectFile], conversations: [...project.conversations, fileConversation], activeConversationId: fileConversation.id, activeFileId: fileId, updatedAt: now, hydrated: true }
+      project = { ...project, files: [...project.files, projectFile], activeConversationId: '', activeFileId: fileId, updatedAt: now, hydrated: true }
       await projectRepository.saveSource(project.id, fileId, readableFile)
       fileToOpen = projectFile
     }
@@ -633,10 +646,9 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const createConversation = () => {
     if (!activeFileId) return
-    const conversation: Conversation = { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId: activeFileId, contextScope: scope === 'combination' ? 'combination' : 'file' }
-    setConversations([...syncCurrentConversation(), conversation])
-    setActiveConversationId(conversation.id)
-    activeConversationIdRef.current = conversation.id
+    setConversations(syncCurrentConversation())
+    setActiveConversationId('')
+    activeConversationIdRef.current = ''
     setHistory([])
     setCustomPrompt('')
     setError('')
@@ -896,25 +908,80 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
             paragraphs: [],
             state: { status: 'ready' as const, version: documentIndexVersion, indexedAt: Date.now() },
           })
+      const taskKey = `${project.id}:${file.id}`
+      indexTasksRef.current.set(taskKey, task)
       void task.then(({ paragraphs, state }) => {
         if (controller.signal.aborted) return
-        setProjects((items) => items.map((item) => item.id === project.id ? { ...item, updatedAt: Date.now(), files: item.files.map((entry) => entry.id === file.id ? { ...entry, paragraphs, indexState: state, updatedAt: Date.now() } : entry) } : item))
+        setProjects((items) => items.map((item) => item.id === project.id ? { ...item, updatedAt: Date.now(), files: item.files.map((entry) => entry.id === file.id ? { ...entry, paragraphs, indexState: state, indexLoaded: true, updatedAt: Date.now() } : entry) } : item))
       }).catch((reason) => {
         const cancelled = reason instanceof DOMException && reason.name === 'AbortError'
         setProjects((items) => items.map((item) => item.id === project.id ? { ...item, files: item.files.map((entry) => entry.id === file.id ? { ...entry, indexState: cancelled ? { status: 'pending', version: documentIndexVersion } : { status: 'error', version: documentIndexVersion, error: reason instanceof Error ? reason.message : String(reason) } } : entry) } : item))
-      })
+      }).finally(() => { if (indexTasksRef.current.get(taskKey) === task) indexTasksRef.current.delete(taskKey) })
     }, source.kind === 'pdf' && (pdf?.numPages || 0) > 100 ? 1200 : 450)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [source, pdf, activeProjectId, activeFileId])
 
-  const buildProjectContext = (workspaceId: string, query: string, action: AiAction, fileId?: string) => {
-    const project = snapshotCurrent()?.id === workspaceId ? snapshotCurrent() : projects.find((item) => item.id === workspaceId)
+  const buildProjectContext = async (workspaceId: string, query: string, fileId?: string) => {
+    const snapshot = snapshotCurrent()
+    let project = snapshot?.id === workspaceId ? snapshot : projectsRef.current.find((item) => item.id === workspaceId)
     if (!project) return { context: '', references: [] }
+    if (!fileId) {
+      const pendingFiles = project.files.filter((file) => file.kind === 'pdf' && (file.indexState.status !== 'ready' || file.indexState.version !== documentIndexVersion))
+      try { for (let index = 0; index < pendingFiles.length; index += 1) {
+        const file = pendingFiles[index]
+        setProgress(`${pack.code === 'en-US' ? 'Indexing combination' : '正在建立组合索引'} ${index + 1}/${pendingFiles.length} · ${file.name}`)
+        const taskKey: string = `${project.id}:${file.id}`
+        let indexed: { paragraphs: DocumentParagraph[]; state: IndexState } | undefined = await indexTasksRef.current.get(taskKey)?.catch(() => undefined)
+        if (!indexed) {
+          const blob = file.id === activeFileId && pdf ? null : await projectRepository.getSource(project.id, file.id, file.type)
+          if ((!pdf && !blob) || (file.id !== activeFileId && !blob)) continue
+          const temporaryUrl = blob ? URL.createObjectURL(blob) : ''
+          const pdfTools = await import('./lib/pdf')
+          let temporaryPdf: PDFDocumentProxy | undefined
+          try {
+            temporaryPdf = file.id === activeFileId && pdf ? pdf : await pdfTools.loadPdf(temporaryUrl)
+            const { documentIndexer } = await import('./services/documentIndexer')
+            indexed = await documentIndexer.indexPdf(temporaryPdf, project.id, file.id, undefined, { priorityPage: file.readingState.page })
+          } finally {
+            if (temporaryPdf && temporaryPdf !== pdf) await pdfTools.destroyPdf(temporaryPdf)
+            if (temporaryUrl) URL.revokeObjectURL(temporaryUrl)
+          }
+        }
+        if (!indexed) continue
+        const indexedAt: number = indexed.state.indexedAt || project.updatedAt
+        const updatedFile = { ...file, paragraphs: indexed.paragraphs, indexState: indexed.state, indexLoaded: true, updatedAt: indexedAt }
+        const storedProject = { ...project, updatedAt: indexedAt, files: project.files.map((item) => item.id === file.id ? updatedFile : { ...item, paragraphs: [], indexLoaded: false }) }
+        await projectRepository.save(storedProject)
+        project = { ...project, updatedAt: indexedAt, files: project.files.map((item) => item.id === file.id ? (item.id === activeFileId ? updatedFile : { ...updatedFile, paragraphs: [], indexLoaded: false }) : item) }
+      } } finally { setProgress('') }
+      projectsRef.current = projectsRef.current.map((item) => item.id === project!.id ? project! : item)
+      setProjects(projectsRef.current)
+      if (project.hydrated) await projectRepository.save(project)
+      const result = await projectRepository.retrieveContext(workspaceId, query, { maxHits: 64, maxCharacters: 80000 })
+      return { context: result.context, references: [] }
+    }
+    project = await hydrateProject(project, fileId)
+    const targetFiles = fileId ? project.files.filter((file) => file.id === fileId) : project.files
+
+    // A newly opened PDF can be queried before the background index starts.
+    // Build its index here instead of sending an empty-context request.
+    if (!targetFiles.some((file) => file.paragraphs.length) && pdf && activeFileId && targetFiles.some((file) => file.id === activeFileId)) {
+      const { documentIndexer } = await import('./services/documentIndexer')
+      const { paragraphs, state } = await documentIndexer.indexPdf(pdf, project.id, activeFileId, undefined, { priorityPage: currentPageRef.current })
+      const indexedAt = state.indexedAt || project.updatedAt
+      project = {
+        ...project,
+        updatedAt: indexedAt,
+        files: project.files.map((file) => file.id === activeFileId ? { ...file, paragraphs, indexState: state, updatedAt: indexedAt } : file),
+      }
+      projectsRef.current = projectsRef.current.map((item) => item.id === project!.id ? project! : item)
+      setProjects(projectsRef.current)
+      await projectRepository.save(project)
+    }
     const strategy = fileId ? 'document' : 'project'
-    const coverageRatio = action === 'summarize' || action === 'translate' ? (fileId ? .78 : .65) : undefined
-    const result = retrievalService.retrieve(project, query, { strategy, coverageRatio, fileId, maxHits: 24, maxCharacters: 39000 })
-    const references = createReferences(project, result.hits, 24)
-    return { context: createCitationContext(references), references }
+    const result = retrievalService.retrieve(project, query, { strategy, fileId, maxHits: fileId ? 56 : 64, maxCharacters: fileId ? 65000 : 80000 })
+    const references = createReferences(project, result.hits, 64)
+    return { context: `${result.overview}\n\n【按任务提取的正文证据】\n${createCitationContext(references)}`, references }
   }
 
   const updateConversationRoute = (workspaceId: string, conversationId: string, update: (conversation: Conversation) => Conversation) => {
@@ -1021,7 +1088,9 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const activeRoute = conversations.find((item) => item.id === conversationId)
     const routeMatches = activeRoute && activeRoute.ownerType === 'file' && activeRoute.fileId === activeFileId && (activeRoute.contextScope || 'file') === expectedContextScope
     if (!conversationId || !routeMatches) {
-      const existing = conversations.find((item) => item.ownerType === 'file' && item.fileId === activeFileId && (item.contextScope || 'file') === expectedContextScope)
+      // An empty active id represents a user-requested draft. Do not reuse an
+      // older conversation; persist this one only when the first request starts.
+      const existing = activeConversationId ? conversations.find((item) => item.ownerType === 'file' && item.fileId === activeFileId && (item.contextScope || 'file') === expectedContextScope) : undefined
       const conversation: Conversation = existing || { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId: activeFileId || undefined, contextScope: expectedContextScope }
       conversationId = conversation.id
       previousHistory = conversation.history
@@ -1049,7 +1118,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const contextMode: ChatMessage['contextMode'] = scope
     const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, prompt: effectiveInstruction || actionLabel, contextMode, label: userLabel, sourcePage: currentPage }
     const assistantId = makeId()
-    const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', contextMode, citationsDisabled: !targetUsesContext }
+    const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', contextMode, citationsDisabled: !targetUsesContext || targetIsProject }
     const requestHistory = [...previousHistory, userMessage]
     const visibleHistory = [...requestHistory, assistantMessage]
     setHistory(visibleHistory)
@@ -1068,11 +1137,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       if (visionAvailable) {
         for (const selectionImage of selectionImages) requestImages.push(await resolveSelectionImage(selectionImage))
       }
-      const retrieval = targetUsesContext ? buildProjectContext(workspaceId, effectiveInstruction || actionLabel, action, targetIsProject ? undefined : activeFileId || undefined) : { context: '', references: [] }
+      const retrieval = targetUsesContext ? await buildProjectContext(workspaceId, effectiveInstruction || actionLabel, targetIsProject ? undefined : activeFileId || undefined) : { context: '', references: [] }
       const targetProject = snapshotCurrent()
       const annotationContext = !targetUsesContext ? '' : targetIsProject
         ? (targetProject?.files || []).flatMap((file) => file.annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[${file.name}｜第 ${annotation.page} 页批注]\n${annotation.text.trim()}`)).join('\n\n')
         : annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[第 ${annotation.page} 页批注]\n${annotation.text.trim()}`).join('\n\n')
+      const documentText = [retrieval.context, annotationContext].filter(Boolean).join('\n\n')
+      if (targetUsesContext && !documentText) throw new Error(pack.code === 'en-US' ? 'The document has no readable text to process.' : '文档中没有可供处理的可读文字。')
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1080,8 +1151,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         body: JSON.stringify({
           action,
           selectedText: targetUsesContext ? '' : selectedText,
-          documentText: [retrieval.context, annotationContext].filter(Boolean).join('\n\n'),
-          references: retrieval.references,
+          documentText,
+          references: targetIsProject ? [] : retrieval.references,
           instruction: effectiveInstruction,
           includeContext: targetUsesContext && Boolean(retrieval.context),
           contextMode,
@@ -1105,7 +1176,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         }
         if (event.type === 'done') {
           streamedContent = event.content
-          updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetUsesContext && Array.isArray(event.references) ? event.references : undefined } : message) }))
+          updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetUsesContext && !targetIsProject && Array.isArray(event.references) ? event.references : undefined } : message) }))
         }
       })
       learnUserMemory(effectiveInstruction || actionLabel, done.content)
@@ -1155,8 +1226,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const applyReaderLocation = async (location: ReaderLocation, showFocus = true) => {
     const project = projects.find((item) => item.id === location.projectId) || (await projectRepository.get(location.projectId).then((item) => item ? ({ ...item, hydrated: true } as RuntimeProject) : null))
     if (!project || !project.files.some((file) => file.id === location.fileId)) { setError('引用或标签对应的文件已被删除。'); return false }
-    const opened = await openProjectFile(location.projectId, location.fileId)
-    if (!opened) return false
+    const alreadyOpen = activeProjectIdRef.current === location.projectId && activeFileIdRef.current === location.fileId && Boolean(source)
+    if (!alreadyOpen) {
+      const opened = await openProjectFile(location.projectId, location.fileId)
+      if (!opened) return false
+    }
     if (location.zoom) setZoom(location.zoom)
     setCitationFocus(showFocus && location.region ? { page: location.page, region: location.region } : null)
     jumpToPage(location.page, location.region?.top, location.scrollTop)

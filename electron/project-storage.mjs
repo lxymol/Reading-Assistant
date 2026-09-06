@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
+import { retrieveProjectContext } from './project-retrieval.mjs'
 
 // All operations use the existing v2 paths and file format. The worker executes
 // requests serially so reads, saves and deletes retain IPC submission order.
@@ -62,7 +63,7 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     return { id: record.id, name: record.name, fileCount: Array.isArray(record.fileOrder) ? record.fileOrder.length : 0, conversationCount: Array.isArray(record.conversations) ? record.conversations.length : 0, updatedAt: record.updatedAt, activeFileId: record.activeFileId || null }
   }
 
-  function readProjectRecord(id, lightweight = false) {
+  function readProjectRecord(id, lightweight = false, indexFileId = null) {
     const directory = projectDataDirectory(id)
     const metadataPath = path.join(directory, 'project.json')
     if (!fs.existsSync(metadataPath)) return null
@@ -75,9 +76,10 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
       if (!fs.existsSync(filePath)) return []
       const value = JSON.parse(fs.readFileSync(filePath, 'utf8'))
       const indexPath = path.join(fileDirectory, 'index.json')
-      const index = !lightweight && fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : { paragraphs: [], indexState: value.indexState }
+      const indexLoaded = !lightweight && (!indexFileId || indexFileId === fileId)
+      const index = indexLoaded && fs.existsSync(indexPath) ? JSON.parse(fs.readFileSync(indexPath, 'utf8')) : { paragraphs: [], indexState: value.indexState }
       const { assetManifest: _assetManifest, fileNotes: _fileNotes, fileNoteAssets: _fileNoteAssets, ...file } = value
-      return [{ ...file, paragraphs: Array.isArray(index.paragraphs) ? index.paragraphs : [], indexState: index.indexState || file.indexState }]
+      return [{ ...file, paragraphs: Array.isArray(index.paragraphs) ? index.paragraphs : [], indexState: index.indexState || file.indexState, ...((lightweight || indexFileId) ? { indexLoaded } : {}) }]
     })
     const { projectNotes: _projectNotes, projectNoteAssets: _projectNoteAssets, ...withoutLegacyNotes } = project
     return { ...withoutLegacyNotes, files, ...(lightweight ? { conversations: (project.conversations || []).map((conversation) => ({ ...conversation, history: [] })) } : {}) }
@@ -109,9 +111,9 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     for (const value of files) {
       const fileDirectory = projectFileDirectory(payload.id, value.id)
       fs.mkdirSync(fileDirectory, { recursive: true })
-      const { paragraphs, fileNotes: _fileNotes, fileNoteAssets: _fileNoteAssets, assetManifest: _assetManifest, ...file } = value
+      const { paragraphs, indexLoaded, fileNotes: _fileNotes, fileNoteAssets: _fileNoteAssets, assetManifest: _assetManifest, ...file } = value
       writeJsonAtomically(path.join(fileDirectory, 'file.json'), file)
-      writeJsonAtomically(path.join(fileDirectory, 'index.json'), { indexState: file.indexState, paragraphs })
+      if (indexLoaded !== false) writeJsonAtomically(path.join(fileDirectory, 'index.json'), { indexState: file.indexState, paragraphs })
     }
     const record = { schemaVersion: storageSchemaVersion, kind: 'raid-project', ...project, fileOrder: files.map((file) => file.id) }
     writeJsonAtomically(path.join(directory, 'project.json'), record)
@@ -135,9 +137,29 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     return true
   }
 
+  function retrieveStoredProjectContext(id, query, options = {}) {
+    const directory = projectDataDirectory(id)
+    const metadataPath = path.join(directory, 'project.json')
+    if (!fs.existsSync(metadataPath)) return { context: '', hitCount: 0 }
+    const stored = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+    const fileOrder = stored.fileOrder || []
+    function * files() {
+      for (const fileId of fileOrder) {
+        const fileDirectory = projectFileDirectory(id, fileId)
+        const metadata = path.join(fileDirectory, 'file.json')
+        const index = path.join(fileDirectory, 'index.json')
+        if (!fs.existsSync(metadata) || !fs.existsSync(index)) continue
+        const file = JSON.parse(fs.readFileSync(metadata, 'utf8'))
+        const indexed = JSON.parse(fs.readFileSync(index, 'utf8'))
+        yield { name: file.name, paragraphs: indexed.paragraphs || [] }
+      }
+    }
+    return retrieveProjectContext(files(), query, { ...options, fileCount: fileOrder.length })
+  }
+
   function deleteProjectRecord(id) { fs.rmSync(projectDataDirectory(id), { recursive: true, force: true }); writeDataManifest() }
   function deleteProjectFile(projectId, fileId) { fs.rmSync(projectFileDirectory(projectId, fileId), { recursive: true, force: true }); writeDataManifest() }
 
 
-  return { initialize: writeDataManifest, readProjectRecord, listProjectSummaries, saveProjectRecord, getProjectFileSource, saveProjectFileSource, deleteProjectRecord, deleteProjectFile, flush: () => true }
+  return { initialize: writeDataManifest, readProjectRecord, listProjectSummaries, saveProjectRecord, retrieveStoredProjectContext, getProjectFileSource, saveProjectFileSource, deleteProjectRecord, deleteProjectFile, flush: () => true }
 }

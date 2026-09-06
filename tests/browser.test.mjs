@@ -97,7 +97,32 @@ try {
     await repository.deleteProject(project.id)
     check(await repository.get(project.id) === null, 'Project deletion failed')
     check(await repository.getSource(project.id, 'source', 'text/plain') === null, 'Source deletion failed')
-    return { ui: 'workspace rendered', storage: 'round-trip, commit, rollback, connection reuse, cascade deletion passed' }
+
+    const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), value => value.charCodeAt(0))
+    const transfer = new DataTransfer()
+    transfer.items.add(new File([bytes], 'conversation-test.png', { type: 'image/png' }))
+    const input = document.querySelector('.empty-library-add input')
+    Object.defineProperty(input, 'files', { configurable: true, value: transfer.files })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await waitFor(() => document.querySelector('.library-file'))
+    check(!document.querySelector('.file-chat-count'), 'Import created an empty conversation')
+    document.querySelector('button[title="对话"]').click()
+    await waitFor(() => document.querySelector('button[title="新对话"]'))
+    document.querySelector('button[title="新对话"]').click()
+    check(!document.querySelector('.file-chat-count'), 'New conversation draft was persisted before sending')
+
+    const originalFetch = window.fetch
+    window.fetch = async (url, options) => String(url).endsWith('/api/ai')
+      ? new Response('{"type":"done","content":"Done"}\\n', { status: 200 })
+      : originalFetch(url, options)
+    const prompt = document.querySelector('.prompt-box textarea')
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(prompt, 'Hello')
+    prompt.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    document.querySelector('.prompt-box button').click()
+    await waitFor(() => document.querySelector('.file-chat-count')?.textContent === '1')
+    window.fetch = originalFetch
+    return { ui: 'workspace and lazy conversation creation passed', storage: 'round-trip, commit, rollback, connection reuse, cascade deletion passed' }
   })()`, awaitPromise: true, returnByValue: true }, sessionId)
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text)
   console.log(JSON.stringify(result.result.value))

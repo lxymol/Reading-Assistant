@@ -1,4 +1,5 @@
 import type { Project, ProjectSummary, RuntimeProject, RuntimeProjectFile } from '../types'
+import { retrievalService } from './retrievalService'
 
 const databaseName = 'raid-projects-v2'
 const projectStore = 'projects'
@@ -56,15 +57,32 @@ export class ProjectRepository {
     return projects.map((project) => ({ id: project.id, name: project.name, fileCount: project.files.length, conversationCount: project.conversations.length, updatedAt: project.updatedAt, activeFileId: project.activeFileId })).sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
-  async get(id: string, lightweight = false): Promise<Project | null> {
-    if (window.readingAssistant) return window.readingAssistant.getProject(id, lightweight)
-    return await idbRequest<Project | undefined>(projectStore, 'readonly', (store) => store.get(id)) || null
+  async get(id: string, lightweight = false, indexFileId: string | null = null): Promise<Project | null> {
+    if (window.readingAssistant) return window.readingAssistant.getProject(id, lightweight, indexFileId)
+    const project = await idbRequest<Project | undefined>(projectStore, 'readonly', (store) => store.get(id))
+    if (!project) return null
+    return { ...project, files: project.files.map((file) => ({ ...file, paragraphs: !lightweight && (!indexFileId || file.id === indexFileId) ? file.paragraphs : [], indexLoaded: !lightweight && (!indexFileId || file.id === indexFileId) })), ...(lightweight ? { conversations: project.conversations.map((conversation) => ({ ...conversation, history: [] })) } : {}) }
+  }
+
+  async retrieveContext(id: string, query: string, options: { maxCharacters?: number; maxHits?: number }) {
+    if (window.readingAssistant?.retrieveProjectContext) return window.readingAssistant.retrieveProjectContext(id, query, options)
+    const project = await this.get(id)
+    if (!project) return { context: '', hitCount: 0 }
+    const result = retrievalService.retrieve({ ...project, files: project.files as RuntimeProjectFile[] }, query, { ...options, strategy: 'project' })
+    return { context: result.context, hitCount: result.hits.length }
   }
 
   async save(project: RuntimeProject | Project) {
     const value = persistedProject(project)
     if (window.readingAssistant) return window.readingAssistant.saveProject(value)
-    await idbRequest<IDBValidKey>(projectStore, 'readwrite', (store) => store.put(value))
+    const existing = await idbRequest<Project | undefined>(projectStore, 'readonly', (store) => store.get(value.id))
+    const merged = { ...value, files: value.files.map((file) => {
+      const runtime = file as RuntimeProjectFile
+      if (runtime.indexLoaded !== false) return file
+      const stored = existing?.files.find((item) => item.id === file.id)
+      return { ...file, paragraphs: stored?.paragraphs || [] }
+    }) }
+    await idbRequest<IDBValidKey>(projectStore, 'readwrite', (store) => store.put(merged))
     return true
   }
 

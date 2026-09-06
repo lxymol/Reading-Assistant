@@ -6,6 +6,13 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectStorage } from '../electron/project-storage.mjs'
 import { ProjectStorageClient } from '../electron/project-storage-client.mjs'
+import { groundCitationTags, stripCitationTags } from '../server/citations.mjs'
+
+test('combination answers remove all internal source tags while document answers retain valid references', () => {
+  const answer = '结论。[[REF:1]] [[PAGE:2]] [[SOURCE:3|paper.pdf]]'
+  assert.equal(stripCitationTags(answer), '结论。')
+  assert.equal(groundCitationTags(answer, [{ number: 1 }]), '结论。[[REF:1]]')
+})
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raid-storage-test-'))
@@ -58,6 +65,52 @@ test('reading-position saves preserve unchanged indexes across cache misses and 
   fs.writeFileSync(indexPath, '{}')
   fresh.saveProjectRecord(record)
   assert.deepEqual(fresh.readProjectRecord('project').files[0].paragraphs, record.files[0].paragraphs)
+})
+
+test('selective reads load one index and partial saves preserve unloaded indexes', (t) => {
+  const { storage, record } = fixture(t)
+  const second = { ...record.files[0], id: 'second', name: 'second.pdf', paragraphs: [{ text: 'Second evidence' }] }
+  storage.saveProjectRecord({ ...record, files: [...record.files, second] })
+  const selective = storage.readProjectRecord('project', false, 'file')
+  assert.equal(selective.files[0].indexLoaded, true)
+  assert.equal(selective.files[1].indexLoaded, false)
+  assert.deepEqual(selective.files[1].paragraphs, [])
+  selective.files[1].readingState = { page: 8, zoom: 1 }
+  storage.saveProjectRecord(selective)
+  const restored = storage.readProjectRecord('project')
+  assert.deepEqual(restored.files[1].paragraphs, second.paragraphs)
+  assert.deepEqual(restored.files[1].readingState, { page: 8, zoom: 1 })
+})
+
+test('stored combination retrieval returns bounded context from multiple files', (t) => {
+  const { storage, record } = fixture(t)
+  const second = { ...record.files[0], id: 'second', name: 'second.pdf', paragraphs: [{ id: 'p2', page: 2, order: 0, text: 'graph benchmark result' }] }
+  const first = { ...record.files[0], paragraphs: [{ id: 'p1', page: 1, order: 0, text: 'graph method evidence' }] }
+  storage.saveProjectRecord({ ...record, files: [first, second] })
+  const result = storage.retrieveStoredProjectContext('project', 'graph benchmark', { maxHits: 4, maxCharacters: 1000 })
+  assert.equal(result.hitCount, 2)
+  assert.match(result.context, /paper\.pdf/)
+  assert.match(result.context, /second\.pdf/)
+  assert.ok(result.context.length <= 1000)
+})
+
+test('stored combination retrieval maps every paper and reserves evidence beyond opening paragraphs', (t) => {
+  const { storage, record } = fixture(t)
+  const files = Array.from({ length: 10 }, (_, fileIndex) => ({
+    ...record.files[0], id: `file-${fileIndex}`, name: `paper-${fileIndex}.pdf`,
+    paragraphs: [
+      { id: `${fileIndex}-abstract`, fileId: `file-${fileIndex}`, page: 1, order: 0, text: 'ABSTRACT' },
+      { id: `${fileIndex}-method`, fileId: `file-${fileIndex}`, page: 4, order: 1, text: `METHODS approach ${fileIndex}` },
+      { id: `${fileIndex}-result`, fileId: `file-${fileIndex}`, page: 8, order: 2, text: `RESULTS benchmark signal ${fileIndex}` },
+      { id: `${fileIndex}-limit`, fileId: `file-${fileIndex}`, page: 10, order: 3, text: `LIMITATIONS cohort ${fileIndex}` },
+    ],
+  }))
+  storage.saveProjectRecord({ ...record, files })
+  const result = storage.retrieveStoredProjectContext('project', 'benchmark signal', { maxHits: 64, maxCharacters: 30000 })
+  for (let index = 0; index < files.length; index += 1) assert.match(result.context, new RegExp(`paper-${index}\\.pdf`))
+  assert.match(result.context, /METHODS approach 9/)
+  assert.match(result.context, /RESULTS benchmark signal 9/)
+  assert.match(result.context, /LIMITATIONS cohort 9/)
 })
 
 test('invalid files are rejected before any saved data changes and deletes can be followed by recreation', (t) => {

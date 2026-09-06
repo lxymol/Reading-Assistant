@@ -85,7 +85,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .selectable-page { position: relative; line-height: 0; background: white; box-shadow: var(--shadow); user-select: none; touch-action: none; cursor: default; }
 .selectable-page.selection-enabled { cursor: crosshair; }
 .continuous-selection .selectable-page { cursor: crosshair; }
-.text-selection-mode .selectable-page { cursor: text; }
+.text-selection-mode .selectable-page { cursor: text; user-select: text; touch-action: auto; }
 .selectable-page canvas { display: block; max-width: none; }
 .selectable-page.file-inverted { background: #1e1e1e; box-shadow: 0 15px 45px rgba(0,0,0,.3); }
 .selectable-page.file-inverted canvas { filter: invert(.88) hue-rotate(180deg) brightness(.88) contrast(.96); }

@@ -57,7 +57,7 @@ export type ProjectFile = {
   annotations: DocumentAnnotation[]; paragraphs: DocumentParagraph[]; indexState: IndexState
 }
 
-export type RuntimeProjectFile = ProjectFile & { source?: SourceFile; pdf?: PDFDocumentProxy | null; sourceLoaded?: boolean }
+export type RuntimeProjectFile = ProjectFile & { source?: SourceFile; pdf?: PDFDocumentProxy | null; sourceLoaded?: boolean; indexLoaded?: boolean }
 
 export type DocumentTag = {
   id: string; projectId: string; fileId: string; page: number; region: NormalizedRegion; label: string; createdAt: number
@@ -85,7 +85,8 @@ declare global {
       selectLanguageFolder: () => Promise<FolderImportResult>
       convertDocument: (payload: { name: string; type: string; lastModified: number; data: ArrayBuffer }) => Promise<DocumentConversionResult>
       listProjects: () => Promise<ProjectSummary[]>
-      getProject: (id: string, lightweight?: boolean) => Promise<Project | null>
+      getProject: (id: string, lightweight?: boolean, indexFileId?: string | null) => Promise<Project | null>
+      retrieveProjectContext: (id: string, query: string, options?: { maxCharacters?: number; maxHits?: number }) => Promise<{ context: string; hitCount: number }>
       saveProject: (project: Project) => Promise<boolean>
       getProjectFileSource: (projectId: string, fileId: string) => Promise<Uint8Array | null>
       saveProjectFileSource: (payload: { projectId: string; fileId: string; data: ArrayBuffer }) => Promise<boolean>

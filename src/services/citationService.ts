@@ -2,7 +2,7 @@ import type { ChatReference, DocumentParagraph, RuntimeProject } from '../types'
 
 export type RetrievalHit = { paragraph: DocumentParagraph; fileName: string; score: number }
 
-export function createReferences(project: RuntimeProject, hits: RetrievalHit[], limit = 24): ChatReference[] {
+export function createReferences(project: RuntimeProject, hits: RetrievalHit[], limit = 64): ChatReference[] {
   const seen = new Set<string>()
   return hits.filter((hit) => {
     if (seen.has(hit.paragraph.id)) return false
@@ -11,7 +11,7 @@ export function createReferences(project: RuntimeProject, hits: RetrievalHit[], 
   }).slice(0, limit).map((hit, index) => ({
     id: crypto.randomUUID(), number: index + 1, projectId: project.id, fileId: hit.paragraph.fileId,
     fileName: hit.fileName, paragraphId: hit.paragraph.id, page: hit.paragraph.page,
-    region: hit.paragraph.region, text: hit.paragraph.text.slice(0, 1400), textHash: hit.paragraph.textHash,
+    region: hit.paragraph.region, text: hit.paragraph.text.slice(0, 1800), textHash: hit.paragraph.textHash,
   }))
 }
 

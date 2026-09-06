@@ -50,6 +50,8 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
       active = false
       buffer.width = 0
       buffer.height = 0
+      canvas.width = 0
+      canvas.height = 0
     }
   }, [render, retry])
 

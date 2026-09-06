@@ -9,6 +9,7 @@ import { analyzePageLayout } from '../src/services/layoutAnalyzer.ts'
 import { normalizeAssistantMath } from '../src/services/markdownMath.ts'
 import { boundSelectionPreviews } from '../src/services/selectionImageCache.ts'
 import { readAiStream, recentSelectionHistory } from '../src/services/aiResponse.ts'
+import { repairClippedWordStart } from '../src/services/textSelection.ts'
 import type { CapturedSelection, ChatMessage, DocumentParagraph, ReaderLocation, RuntimeProject } from '../src/types.ts'
 
 test('AI stream preserves split UTF-8, CRLF boundaries and a final event without a newline', async () => {
@@ -40,6 +41,14 @@ test('selection history retains context boundaries and caps prompts', () => {
   assert.equal(result.length, 3)
   assert.equal(result[0].content, 'Explain\n【当时选区】\nExcerpt')
   assert.equal(result[2].content.length, 4000)
+})
+
+test('PDF text selection restores a clipped first letter only at a word boundary', () => {
+  assert.equal(repairClippedWordStart('ime consuming', 'Time consuming', 1), 'Time consuming')
+  assert.equal(repairClippedWordStart('ransformer', 'A Transformer model', 3), 'Transformer')
+  assert.equal(repairClippedWordStart('ansformer', 'A Transformer model', 4), 'ansformer')
+  assert.equal(repairClippedWordStart('结果', '研究结果', 2), '结果')
+  assert.equal(repairClippedWordStart('word', ' word', 1), 'word')
 })
 
 const paragraph = (fileId: string, order: number, text: string): DocumentParagraph => ({
@@ -117,6 +126,29 @@ test('document retrieval combines whole-file coverage with query-relevant paragr
   assert.ok(orders.includes(59))
   assert.ok(orders.includes(31))
   assert.deepEqual(orders, [...orders].sort((a, b) => a - b))
+})
+
+test('document retrieval reads every paragraph when the complete paper fits the context budget', () => {
+  const result = new RetrievalService().retrieve(project, 'summarize the paper', { fileId: 'left', strategy: 'document', maxHits: 20, maxCharacters: 5000 })
+  assert.deepEqual(result.hits.map((hit) => hit.paragraph.order), [0, 1])
+  assert.match(result.context, /全文阅读地图/)
+  assert.match(result.context, /training details and optimizer/)
+})
+
+test('large-document reading map and evidence cover methods, results and limitations beyond the abstract', () => {
+  const section = (order: number, text: string) => paragraph('left', order, text)
+  const paragraphs = [
+    section(0, 'ABSTRACT'), section(1, 'short abstract only'), section(2, '1 INTRODUCTION'), section(3, 'background'),
+    section(4, '2 METHODS'), section(5, 'method architecture and training procedure'), section(6, '3 RESULTS'),
+    section(7, 'experiment results improve accuracy'), section(8, '4 LIMITATIONS'), section(9, 'limitations include a small cohort'),
+  ]
+  const longProject = { ...project, files: [{ ...project.files[0], paragraphs }] }
+  const result = new RetrievalService().retrieve(longProject, 'summarize', { fileId: 'left', strategy: 'document', maxHits: 9, maxCharacters: 9000 })
+  const text = result.hits.map((hit) => hit.paragraph.text).join('\n')
+  assert.match(result.overview, /METHODS/)
+  assert.match(text, /training procedure/)
+  assert.match(text, /improve accuracy/)
+  assert.match(text, /small cohort/)
 })
 
 test('project retrieval keeps representative evidence from different files', () => {

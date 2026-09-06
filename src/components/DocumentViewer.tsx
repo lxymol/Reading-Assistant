@@ -10,6 +10,7 @@ import SelectableCanvas from './SelectableCanvas'
 import AnnotationLayer from './AnnotationLayer'
 import type { AnnotationTool, DocumentAnnotation, DocumentHighlight, DocumentTag, NormalizedRegion, SelectionResult, SourceFile, TextAnnotation } from '../types'
 import { destroyPdf, loadPdf, type DocumentReference } from '../lib/pdf'
+import { repairClippedWordStart } from '../services/textSelection'
 import { useI18n } from '../i18n'
 import { cacheSelectionCanvas } from '../services/selectionImageCache'
 
@@ -121,7 +122,7 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     const page = await pdf.getPage(pageNumber)
     const displayViewport = page.getViewport({ scale: 0.82 * zoom })
     const requestedScale = Math.min(window.devicePixelRatio || 1, 1.6)
-    const maximumPixels = 16_000_000
+    const maximumPixels = 8_000_000
     const outputScale = Math.min(requestedScale, Math.sqrt(maximumPixels / Math.max(1, displayViewport.width * displayViewport.height)))
     const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
     const context = canvas.getContext('2d')
@@ -221,7 +222,7 @@ function LazyPdfPage({ priority, ...props }: PdfPageProps & { priority: boolean 
         })
       }
       setNearViewport(entry.isIntersecting)
-    }, { root, rootMargin: '1200px 0px' })
+    }, { root, rootMargin: '650px 0px' })
     observer.observe(shell)
     return () => observer.disconnect()
   }, [props.zoom])
@@ -296,7 +297,7 @@ async function renderPdfSelection(pdf: PDFDocumentProxy, pageNumber: number, zoo
     const regionWidth = Math.max(1, displayViewport.width * region.width)
     const regionHeight = Math.max(1, displayViewport.height * region.height)
     const requestedScale = Math.min(window.devicePixelRatio || 1, 1.6)
-    const maximumPixels = 16_000_000
+    const maximumPixels = 8_000_000
     const outputScale = Math.min(requestedScale, 2600 / Math.max(regionWidth, regionHeight), Math.sqrt(maximumPixels / (regionWidth * regionHeight)))
     const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
     const crop = document.createElement('canvas')
@@ -530,7 +531,12 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       const range = selection.getRangeAt(0)
       const stack = stackRef.current
       if (!stack?.contains(range.commonAncestorContainer)) return setTextAction(null)
-      const text = selection.toString().trim()
+      const rawText = selection.toString()
+      const text = repairClippedWordStart(
+        rawText,
+        range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.textContent || '' : '',
+        range.startOffset,
+      ).trim()
       if (!text) return setTextAction(null)
       const bounds = range.getBoundingClientRect()
       const regions: SelectionResult['regions'] = []
@@ -636,7 +642,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
         ? <ImagePage source={source} zoom={zoom} inverted={inverted} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         : pdf && Array.from({ length: pdf.numPages }, (_, index) => {
           const pageNumber = index + 1
-          return <LazyPdfPage key={pageNumber} priority={Math.abs(pageNumber - currentPage) <= 2} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
+          return <LazyPdfPage key={pageNumber} priority={Math.abs(pageNumber - currentPage) <= 1} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         })}
       {selectionRect && <div className="document-selection-rect" style={selectionRect} />}
       {textActionPopover && createPortal(textActionPopover, document.body)}
