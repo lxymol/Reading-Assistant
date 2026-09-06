@@ -20,6 +20,7 @@
   "main": "electron/main.mjs",
   "scripts": {
     "test": "node scripts/run-tests.mjs",
+    "test:browser": "node tests/browser.test.mjs",
     "generate:icons": "node scripts/generate-icons.mjs",
     "dev": "concurrently -k \"vite\" \"node --watch server/index.mjs\"",
     "build": "tsc -b && vite build",

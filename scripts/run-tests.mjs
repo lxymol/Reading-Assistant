@@ -10,10 +10,12 @@ rmSync(output, { recursive: true, force: true })
 const sources = [
   'tests/core.test.ts', 'src/services/navigationService.ts', 'src/services/retrievalService.ts',
   'src/services/citationService.ts', 'src/services/tagStore.ts', 'src/services/layoutAnalyzer.ts',
+  'src/services/markdownMath.ts',
+  'src/services/selectionImageCache.ts',
 ]
 const compiler = spawnSync(process.execPath, [path.join(root, 'node_modules', 'typescript', 'bin', 'tsc'), ...sources, '--target', 'ES2022', '--module', 'ESNext', '--moduleResolution', 'Bundler', '--rewriteRelativeImportExtensions', '--outDir', output, '--types', 'node', '--skipLibCheck', '--esModuleInterop'], { cwd: root, stdio: 'inherit' })
 if (compiler.status !== 0) process.exit(compiler.status || 1)
 
 const testFile = path.join(output, 'tests', 'core.test.js')
-const runner = spawnSync(process.execPath, ['--test', testFile], { cwd: root, stdio: 'inherit' })
+const runner = spawnSync(process.execPath, ['--test', testFile, path.join(root, 'tests', 'storage.test.mjs')], { cwd: root, stdio: 'inherit' })
 process.exit(runner.status || 0)

@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('readingAssistant', {
   selectLanguageFolder: () => ipcRenderer.invoke('reading-assistant:select-language-folder'),
   convertDocument: (payload) => ipcRenderer.invoke('reading-assistant:convert-document', payload),
   listProjects: () => ipcRenderer.invoke('reading-assistant:list-projects'),
-  getProject: (id) => ipcRenderer.invoke('reading-assistant:get-project', id),
+  getProject: (id, lightweight = false) => ipcRenderer.invoke('reading-assistant:get-project', id, lightweight),
   saveProject: (project) => ipcRenderer.invoke('reading-assistant:save-project', project),
   getProjectFileSource: (projectId, fileId) => ipcRenderer.invoke('reading-assistant:get-project-file-source', projectId, fileId),
   saveProjectFileSource: (payload) => ipcRenderer.invoke('reading-assistant:save-project-file-source', payload),
@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('readingAssistant', {
   getQuickOpenEnabled: () => ipcRenderer.invoke('reading-assistant:get-quick-open-enabled'),
   setQuickOpenEnabled: (enabled) => ipcRenderer.invoke('reading-assistant:set-quick-open-enabled', enabled),
   checkForUpdates: (force = false) => ipcRenderer.invoke('reading-assistant:check-for-updates', force),
+  storeSelectionImage: (payload) => ipcRenderer.invoke('reading-assistant:store-selection-image', payload),
+  readSelectionImage: (id) => ipcRenderer.invoke('reading-assistant:read-selection-image', id),
+  deleteSelectionImages: (ids) => ipcRenderer.invoke('reading-assistant:delete-selection-images', ids),
   takePendingOpenFiles: () => ipcRenderer.invoke('reading-assistant:take-pending-open-files'),
   onOpenFile: (listener) => {
     const wrapped = (_event, file) => listener(file)

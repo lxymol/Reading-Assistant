@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import type { SelectionResult } from '../types'
+import { cacheSelectionCanvas } from '../services/selectionImageCache'
 
 type Point = { x: number; y: number }
 type Rect = { left: number; top: number; width: number; height: number }
@@ -80,7 +81,7 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
     })
   }
 
-  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const onPointerUp = async (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!startRef.current || !rect || rect.width < 8 || rect.height < 8) {
       startRef.current = null
       setRect(null)
@@ -109,7 +110,8 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
         crop.width,
         crop.height,
       )
-      const image = crop.toDataURL('image/jpeg', 0.92)
+      const image = await cacheSelectionCanvas(crop)
+      crop.width = 0; crop.height = 0
       const region = {
         left: rect.left / bounds.width,
         top: rect.top / bounds.height,
@@ -117,7 +119,7 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
         height: rect.height / bounds.height,
       }
       onSelect({
-        image,
+        image: image.preview,
         images: [image],
         page: pageNumber,
         regions: [{ page: pageNumber, region }],
@@ -136,7 +138,7 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
       style={rendering && initialSize ? { width: initialSize.width, height: initialSize.height } : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
+      onPointerUp={(event) => { void onPointerUp(event) }}
       onPointerCancel={() => { startRef.current = null; setRect(null) }}
     >
       <canvas ref={canvasRef} />

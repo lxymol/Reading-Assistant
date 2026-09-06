@@ -144,6 +144,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 :is(.selection-panel,.panel-selection) .selection-strip { flex-wrap: wrap; align-content:flex-start; overflow: visible; }
 :is(.selection-panel,.panel-selection) .selection-thumb { width: calc(50% - 4px); position: relative; }
 :is(.selection-panel,.panel-selection) .selection-thumb img { width: 100%; height: 68px; display: block; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; background: white; }
+.selection-thumb-placeholder { width: 100%; height: 68px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--surface-soft); font-size: 10px; }
 :root[data-theme='dark'] :is(.selection-panel,.panel-selection) .selection-thumb img { filter: invert(.9) hue-rotate(180deg) brightness(.82) contrast(.9) sepia(.08); }
 .remove-selection-image { position: absolute; z-index: 3; top: 4px; right: 4px; width: 20px; height: 20px; padding: 0; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.55); border-radius: 6px; color: white; background: rgba(18,20,22,.76); box-shadow: 0 2px 8px rgba(0,0,0,.22); cursor: pointer; }
 .remove-selection-image:hover { background: #a53931; }

@@ -3,7 +3,8 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 export type NormalizedRegion = { left: number; top: number; width: number; height: number }
 
 export type SourceFile = { name: string; kind: 'pdf' | 'image'; url: string; file: File }
-export type SelectionResult = { image: string; images: string[]; page: number; regions: Array<{ page: number; region: NormalizedRegion }>; annotationTexts?: string[] }
+export type SelectionImage = { preview: string; cacheId?: string; dataUrl?: string; byteLength?: number }
+export type SelectionResult = { image: string; images: SelectionImage[]; page: number; regions: Array<{ page: number; region: NormalizedRegion }>; annotationTexts?: string[] }
 
 export type DocumentParagraph = {
   id: string; projectId: string; fileId: string; page: number; region: NormalizedRegion
@@ -84,7 +85,7 @@ declare global {
       selectLanguageFolder: () => Promise<FolderImportResult>
       convertDocument: (payload: { name: string; type: string; lastModified: number; data: ArrayBuffer }) => Promise<DocumentConversionResult>
       listProjects: () => Promise<ProjectSummary[]>
-      getProject: (id: string) => Promise<Project | null>
+      getProject: (id: string, lightweight?: boolean) => Promise<Project | null>
       saveProject: (project: Project) => Promise<boolean>
       getProjectFileSource: (projectId: string, fileId: string) => Promise<Uint8Array | null>
       saveProjectFileSource: (payload: { projectId: string; fileId: string; data: ArrayBuffer }) => Promise<boolean>
@@ -98,6 +99,9 @@ declare global {
       getQuickOpenEnabled: () => Promise<boolean>
       setQuickOpenEnabled: (enabled: boolean) => Promise<boolean>
       checkForUpdates: (force?: boolean) => Promise<AppUpdateInfo>
+      storeSelectionImage: (payload: { data: ArrayBuffer; mime: string }) => Promise<{ id: string; byteLength: number }>
+      readSelectionImage: (id: string) => Promise<{ data: Uint8Array; mime: string } | null>
+      deleteSelectionImages: (ids: string[]) => Promise<boolean>
       takePendingOpenFiles: () => Promise<Array<{ name: string; type: string; lastModified: number; data: Uint8Array }>>
       onOpenFile: (listener: (file: { name: string; type: string; lastModified: number; data: Uint8Array }) => void) => () => void
     }

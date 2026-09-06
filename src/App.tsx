@@ -1,35 +1,33 @@
 import { Fragment, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
-import type { Worker as OcrWorker } from 'tesseract.js'
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
-import remarkMath from 'remark-math'
-import remarkGfm from 'remark-gfm'
-import rehypeKatex from 'rehype-katex'
-import 'katex/dist/katex.min.css'
 import {
-  BrainCircuit, Check, ChevronLeft, ChevronRight, Combine, Copy, FileText, Languages, FolderOpen,
+  BrainCircuit, ChevronLeft, ChevronRight, Combine, FileText, Languages, FolderOpen,
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
   Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, Square, Tag,
 } from 'lucide-react'
+import { useOcr } from './hooks/useOcr'
+import { readAiStream, recentSelectionHistory } from './services/aiResponse'
+import ConversationMessages from './components/ConversationMessages'
 import ActivityBar from './components/ActivityBar'
 import ProjectExplorer from './components/ProjectExplorer'
 import TagPanel from './components/TagPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import type { DocumentReference } from './lib/pdf'
-import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, ChatReference, Conversation, DocumentAnnotation, DocumentHighlight, DocumentTag, ImportedSkill, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
+import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, DocumentTag, ImportedSkill, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
 import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadSkills, loadUserMemory } from './lib/preferences'
 import { projectRepository } from './services/projectRepository'
 import { retrievalService } from './services/retrievalService'
 import { createCitationContext, createReferences, validateReference } from './services/citationService'
-import { inlineCitationsToMarkdown, referenceNumberFromHref } from './services/inlineCitation'
+import { boundSelectionPreviews, disposeSelectionImages, resolveSelectionImage } from './services/selectionImageCache'
 import { NavigationService } from './services/navigationService'
 import { ReaderController } from './services/readerController'
 import { createTag, tagsWithoutFile } from './services/tagStore'
 
 const DocumentViewer = lazy(() => import('./components/DocumentViewer'))
 const AiSettingsModal = lazy(() => import('./components/AiSettingsModal'))
+const aiActions = [['translate', Languages], ['explain', MessageSquareText], ['insight', Lightbulb], ['summarize', FileText]] as const
 const documentIndexVersion = 1
 const looseFilesId = 'raid-loose-files'
 
@@ -47,76 +45,6 @@ const normalizePanelZ = (items: Record<PanelId, PanelLayout>) => Object.fromEntr
     .sort(([, first], [, second]) => first.z - second.z)
     .map(([id, layout], index) => [id, { ...layout, z: 41 + index }]),
 ) as Record<PanelId, PanelLayout>
-const normalizeAssistantMarkdown = (content: string, references?: ChatReference[]) => inlineCitationsToMarkdown(content, references)
-  .replace(/```(?:latex|tex)\s*([\s\S]*?)```/gi, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
-  .replace(/\\\[([\s\S]*?)\\\]/g, (_match, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
-  .replace(/\\\((.*?)\\\)/g, (_match, formula: string) => `$${formula.trim()}$`)
-
-function CopyMessageButton({ content, copyLabel }: { content: string; copyLabel: string }) {
-  const [copied, setCopied] = useState(false)
-  const timerRef = useRef<number | null>(null)
-  useEffect(() => () => { if (timerRef.current !== null) window.clearTimeout(timerRef.current) }, [])
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(content)
-      setCopied(true)
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current)
-      timerRef.current = window.setTimeout(() => setCopied(false), 1600)
-    } catch { /* Clipboard permission errors leave the button unchanged. */ }
-  }
-  return <button className={copied ? 'copied' : ''} onClick={() => void copy()} title={copyLabel}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>
-}
-
-type AiStreamEvent = { type: 'delta'; delta: string } | { type: 'done'; content: string; references?: ChatReference[]; model?: string; skillName?: string } | { type: 'error'; error: string }
-type AiDoneEvent = Extract<AiStreamEvent, { type: 'done' }>
-
-const readAiStream = async (response: Response, onEvent: (event: AiStreamEvent) => void): Promise<AiDoneEvent> => {
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}))
-    throw new Error(data.error || `AI request failed (${response.status})`)
-  }
-  if (!response.body) throw new Error('AI response stream is unavailable.')
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let doneEvent: AiDoneEvent | null = null
-  const processLine = (line: string) => {
-    if (!line.trim()) return
-    let event: AiStreamEvent
-    try { event = JSON.parse(line) as AiStreamEvent } catch { return }
-    if (event.type === 'error') throw new Error(event.error)
-    if (event.type === 'done') doneEvent = event
-    onEvent(event)
-  }
-  while (true) {
-    const next = await reader.read()
-    buffer += decoder.decode(next.value || new Uint8Array(), { stream: !next.done })
-    const lines = buffer.split(/\r?\n/)
-    buffer = next.done ? '' : lines.pop() || ''
-    for (const line of lines) processLine(line)
-    if (next.done) break
-  }
-  if (buffer) processLine(buffer)
-  if (!doneEvent) throw new Error('AI response ended before completion.')
-  return doneEvent as AiDoneEvent
-}
-
-const recentSelectionHistory = (messages: ChatMessage[]) => {
-  let inferredMode: ChatMessage['contextMode']
-  return messages.map((message) => {
-    if (message.role === 'user') {
-      inferredMode = message.contextMode
-        || (/选区|selected/i.test(message.label || '') ? 'selection' : /项目|project/i.test(message.label || '') ? 'project' : /全文|document/i.test(message.label || '') ? 'document' : undefined)
-    }
-    const contextMode = message.contextMode || (message.citationsDisabled ? 'selection' : inferredMode)
-    return { message, contextMode }
-  }).filter(({ message, contextMode }) => contextMode === 'selection' && message.content.length <= 12000)
-    .slice(-4)
-    .map(({ message }) => ({
-      role: message.role,
-      content: (message.role === 'user' && message.prompt ? `${message.prompt}\n【当时选区】\n${message.content}` : message.content).slice(0, 4000),
-    }))
-}
 
 type HighlightRegion = NonNullable<DocumentHighlight['regions']>[number]
 const highlightRegionOverlap = (a: HighlightRegion, b: HighlightRegion) => {
@@ -163,6 +91,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [fileDragActive, setFileDragActive] = useState(false)
   const [aiTasks, setAiTasks] = useState<Set<string>>(() => new Set())
   const [progress, setProgress] = useState('')
+  const recognize = useOcr(setProgress)
   const [error, setError] = useState('')
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -189,15 +118,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const abortControllersRef = useRef(new Map<string, AbortController>())
   const projectsRef = useRef(projects)
   const currentPageRef = useRef(currentPage)
-  const hasVisualSelection = (aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))) && selections.some((item) => item.images.length > 0)
+  const visionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
+  const hasVisualSelection = visionAvailable && selections.some((item) => item.images.length > 0)
   const selectionReady = Boolean(selectedText || hasVisualSelection)
-  const workerRef = useRef<OcrWorker | null>(null)
-  const workerPromiseRef = useRef<Promise<OcrWorker> | null>(null)
-  const workerIdleTimerRef = useRef<number | null>(null)
   const fileImportQueueRef = useRef<Promise<void>>(Promise.resolve())
   const openFilesRef = useRef<(files: File[], targetProjectId?: string | null) => Promise<void>>(async () => undefined)
   const fileDragDepthRef = useRef(0)
-  const showOcrProgressRef = useRef(false)
   const resultsEndRef = useRef<HTMLDivElement>(null)
   const panelScrollRef = useRef<HTMLDivElement>(null)
   const chatAutoFollowRef = useRef(true)
@@ -234,6 +160,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const currentAiBusy = aiTasks.has(currentAiTaskKey)
   const slashSkillQuery = customPrompt.match(/^\/([^\s]*)$/)?.[1].toLocaleLowerCase()
   const skillSuggestions = slashSkillQuery === undefined ? [] : skills.filter((skill) => skill.command.toLocaleLowerCase().includes(slashSkillQuery) || skill.name.toLocaleLowerCase().includes(slashSkillQuery)).slice(0, 8)
+
+  const clearCapturedSelections = () => {
+    disposeSelectionImages(selectionsRef.current)
+    selectionsRef.current = []
+    setSelections([])
+    setSelectedText('')
+  }
 
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -394,7 +327,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   useEffect(() => {
     let active = true
     void projectRepository.list().then(async (records) => {
-      const stored = await Promise.all(records.map((record) => projectRepository.get(record.id)))
+      const stored = await Promise.all(records.map((record) => projectRepository.get(record.id, true)))
       if (!active) return
       const now = Date.now()
       const next: RuntimeProject[] = stored.flatMap((project) => project ? [coolProject({ ...project, isLoose: project.id === looseFilesId || project.isLoose, files: project.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true })] : [])
@@ -409,11 +342,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       })
     }).catch(() => undefined)
     return () => { active = false }
-  }, [])
-
-  useEffect(() => () => {
-    if (workerIdleTimerRef.current !== null) window.clearTimeout(workerIdleTimerRef.current)
-    workerRef.current?.terminate()
   }, [])
 
   useLayoutEffect(() => {
@@ -500,7 +428,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setActiveFileId(file?.id || null); activeFileIdRef.current = file?.id || null
     readerControllerRef.current.activate(project.id, file?.id || null)
     setSource(file?.source || null); setPdf(file?.pdf || null)
-    setSelectedText(''); setSelections([]); selectionsRef.current = []
+    clearCapturedSelections()
     const normalizedConversations = project.conversations.map((item) => {
       if (item.ownerType === 'file') return { ...item, contextScope: item.contextScope || 'file' as const }
       return file ? { ...item, ownerType: 'file' as const, fileId: file.id, contextScope: 'combination' as const } : item
@@ -894,51 +822,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     })
   }
 
-  const getWorker = useCallback(async () => {
-    if (workerIdleTimerRef.current !== null) {
-      window.clearTimeout(workerIdleTimerRef.current)
-      workerIdleTimerRef.current = null
-    }
-    if (!workerPromiseRef.current) {
-      workerPromiseRef.current = import('tesseract.js').then(({ createWorker }) => createWorker(['chi_sim', 'eng'], 1, {
-        logger: (message) => {
-          if (showOcrProgressRef.current && message.status === 'recognizing text') setProgress(`${t('recognizing')} ${Math.round((message.progress || 0) * 100)}%`)
-        },
-      })).then((worker) => {
-        workerRef.current = worker
-        return worker
-      }).catch((reason) => {
-        workerPromiseRef.current = null
-        throw reason
-      })
-    }
-    return workerPromiseRef.current
-  }, [t])
-
-  const recognize = useCallback(async (image: string) => {
-    showOcrProgressRef.current = true
-    setProgress(t('preparingOcr'))
-    const worker = await getWorker()
-    try {
-      const result = await worker.recognize(image)
-      return result.data.text.trim()
-    } finally {
-      showOcrProgressRef.current = false
-      if (workerIdleTimerRef.current !== null) window.clearTimeout(workerIdleTimerRef.current)
-      workerIdleTimerRef.current = window.setTimeout(() => {
-        const idleWorker = workerRef.current
-        workerRef.current = null
-        workerPromiseRef.current = null
-        workerIdleTimerRef.current = null
-        void idleWorker?.terminate()
-      }, 5 * 60 * 1000)
-    }
-  }, [getWorker, t])
-
   const onSelect = async (result: SelectionResult) => {
     const selectionId = makeId()
     const captured: CapturedSelection = { ...result, id: selectionId, text: '', textParts: result.images.map(() => ''), loading: true }
-    setSelections((items) => { const next = [...items, captured]; selectionsRef.current = next; return next })
+    setSelections((items) => { const next = boundSelectionPreviews([...items, captured]); selectionsRef.current = next; return next })
     setScope('selection')
     setBusy('ocr')
     setError('')
@@ -952,19 +839,18 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           const { extractPdfRegionText } = await import('./lib/pdf')
           part = await extractPdfRegionText(pdf, selectedRegion.page, selectedRegion.region)
         }
-        const selectionVisionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
-        if (!part && !selectionVisionAvailable) part = await recognize(result.images[index])
+        if (!part && !visionAvailable) part = await recognize(await resolveSelectionImage(result.images[index]))
         const annotationText = result.annotationTexts?.[index]?.trim() || ''
         textParts[index] = [part, annotationText && `批注：${annotationText}`].filter(Boolean).join('\n')
       }
       const current = selectionsRef.current.find((item) => item.id === selectionId)
       if (!current) return
-      const survivingParts = current.images.map((image) => textParts[result.images.indexOf(image)] || '')
+      const imageKey = (image: typeof result.images[number]) => image.cacheId || image.dataUrl || image.preview
+      const survivingParts = current.images.map((image) => textParts[result.images.findIndex((candidate) => imageKey(candidate) === imageKey(image))] || '')
       const text = survivingParts.filter(Boolean).join('\n\n')
       setSelections((items) => { const next = items.map((item) => item.id === selectionId ? { ...item, text, textParts: survivingParts, loading: false } : item); selectionsRef.current = next; return next })
       if (text) setSelectedText((previous) => [previous, text].filter(Boolean).join('\n\n'))
-      const selectionVisionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
-      if (!text && !selectionVisionAvailable) setError(t('noText'))
+      if (!text && !visionAvailable) setError(t('noText'))
     } catch (reason) {
       setSelections((items) => { const next = items.map((item) => item.id === selectionId ? { ...item, loading: false } : item); selectionsRef.current = next; return next })
       setError(reason instanceof Error ? `${t('ocrFailed')}: ${reason.message}` : t('ocrFailed'))
@@ -978,11 +864,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const target = selectionsRef.current.find((item) => item.id === selectionId)
     if (!target) return
     const removedText = target.textParts[imageIndex] || ''
+    disposeSelectionImages([{ images: target.images.slice(imageIndex, imageIndex + 1) }])
     const images = target.images.filter((_, index) => index !== imageIndex)
     const regions = target.regions.filter((_, index) => index !== imageIndex)
     const textParts = target.textParts.filter((_, index) => index !== imageIndex)
     const text = textParts.filter(Boolean).join('\n\n')
-    const nextSelection = { ...target, image: images[0] || '', images, regions, textParts, text }
+    const nextSelection = { ...target, image: images[0]?.preview || '', images, regions, textParts, text }
     const nextSelections = images.length || text ? selectionsRef.current.map((item) => item.id === selectionId ? nextSelection : item) : selectionsRef.current.filter((item) => item.id !== selectionId)
     selectionsRef.current = nextSelections
     setSelections(nextSelections)
@@ -1152,8 +1039,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const selectionImages = targetUsesContext ? [] : selections.flatMap((item) => item.images)
     const selectionUsesText = !targetUsesContext && Boolean(selectedText.trim())
     const fastSelectionTranslation = selectionUsesText && action === 'translate'
-    const visionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
-    const requestImages = visionAvailable ? selectionImages : []
     const reasoningActive = deepThinking && aiConfig.reasoningEnabled
     const actionLabel = (requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId)?.name : effectiveInstruction) || ({ translate: t('translate'), explain: t('explain'), insight: t('insight'), summarize: t('summarize'), custom: 'AI' }[action])
     const emptySelectionChat = !targetUsesContext && !selectionUsesText && selectionImages.length === 0 && action === 'custom' && Boolean(effectiveInstruction)
@@ -1178,6 +1063,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     abortControllersRef.current.set(taskKey, requestController)
     setCustomPrompt('')
     try {
+      // Full screenshots live on disk and are materialized only for the duration of this request.
+      const requestImages: string[] = []
+      if (visionAvailable) {
+        for (const selectionImage of selectionImages) requestImages.push(await resolveSelectionImage(selectionImage))
+      }
       const retrieval = targetUsesContext ? buildProjectContext(workspaceId, effectiveInstruction || actionLabel, action, targetIsProject ? undefined : activeFileId || undefined) : { context: '', references: [] }
       const targetProject = snapshotCurrent()
       const annotationContext = !targetUsesContext ? '' : targetIsProject
@@ -1225,7 +1115,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     } finally {
       abortControllersRef.current.delete(taskKey)
       setAiTasks((items) => { const next = new Set(items); next.delete(taskKey); return next })
-      selectionsRef.current = []; setSelections([]); setSelectedText('')
+      clearCapturedSelections()
     }
   }
 
@@ -1550,30 +1440,18 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const selectionHasImages = selections.some((selection) => selection.images.length > 0)
   const selectionContent = <div className="selection-panel-body single" ref={selectionBodyRef}><section className="selection-content-section">
-    <div className="section-label"><span>{t('selectedContent')} · {selections.length}</span>{selections.length > 0 && <button onClick={() => { selectionsRef.current = []; setSelections([]); setSelectedText('') }}><X size={14} /> {t('clear')}</button>}</div>
-    {selections.length === 0 ? <div className="selection-empty"><MousePointer2 size={22} /></div> : <div className={`selection-result-split ${selectionHasImages ? 'with-images' : 'text-only'}`} ref={selectionSplitRef} style={selectionHasImages ? { gridTemplateRows: `minmax(72px, ${selectionSplitRatio}fr) 7px minmax(72px, ${1 - selectionSplitRatio}fr)` } : undefined}>{selectionHasImages && <div className="selection-image-pane" ref={selectionImagesRef}><div className="selection-strip">{selections.flatMap((selection) => selection.images.map((image, imageIndex) => <div className="selection-thumb" key={`${selection.id}-${imageIndex}`}><img src={image} alt="选区预览" />{selection.loading && <span><LoaderCircle className="spin" size={10} /></span>}<button className="remove-selection-image" onClick={() => removeSelectionImage(selection.id, imageIndex)}><X size={11} /></button></div>))}</div></div>}{selectionHasImages && <div className="section-resizer" role="separator" aria-label="调整选区图片与识别文字高度" aria-orientation="horizontal" title="拖动调整图片与识别文字高度" onPointerDown={startSelectionSplit} onPointerMove={moveSelectionSplit} onPointerUp={stopSelectionSplit} onPointerCancel={stopSelectionSplit} />}{busy === 'ocr' ? <div className="inline-loading selection-text-pane"><LoaderCircle className="spin" size={16} /> {progress}</div> : <textarea className="selection-text-pane" ref={selectionTextRef} value={selectedText} onChange={(e) => setSelectedText(e.target.value)} />}</div>}
+    <div className="section-label"><span>{t('selectedContent')} · {selections.length}</span>{selections.length > 0 && <button onClick={clearCapturedSelections}><X size={14} /> {t('clear')}</button>}</div>
+    {selections.length === 0 ? <div className="selection-empty"><MousePointer2 size={22} /></div> : <div className={`selection-result-split ${selectionHasImages ? 'with-images' : 'text-only'}`} ref={selectionSplitRef} style={selectionHasImages ? { gridTemplateRows: `minmax(72px, ${selectionSplitRatio}fr) 7px minmax(72px, ${1 - selectionSplitRatio}fr)` } : undefined}>{selectionHasImages && <div className="selection-image-pane" ref={selectionImagesRef}><div className="selection-strip">{selections.flatMap((selection) => selection.images.map((image, imageIndex) => <div className="selection-thumb" key={`${selection.id}-${imageIndex}`}>{image.preview ? <img src={image.preview} alt="选区预览" /> : <div className="selection-thumb-placeholder">P{selection.regions[imageIndex]?.page || selection.page}</div>}{selection.loading && <span><LoaderCircle className="spin" size={10} /></span>}<button className="remove-selection-image" onClick={() => removeSelectionImage(selection.id, imageIndex)}><X size={11} /></button></div>))}</div></div>}{selectionHasImages && <div className="section-resizer" role="separator" aria-label="调整选区图片与识别文字高度" aria-orientation="horizontal" title="拖动调整图片与识别文字高度" onPointerDown={startSelectionSplit} onPointerMove={moveSelectionSplit} onPointerUp={stopSelectionSplit} onPointerCancel={stopSelectionSplit} />}{busy === 'ocr' ? <div className="inline-loading selection-text-pane"><LoaderCircle className="spin" size={16} /> {progress}</div> : <textarea className="selection-text-pane" ref={selectionTextRef} value={selectedText} onChange={(e) => setSelectedText(e.target.value)} />}</div>}
   </section></div>
 
   const chatContent = <div className="chat-panel-layout" style={{ '--ai-font-size': `${aiFontSize}px` } as CSSProperties}>
     <section className="ai-fixed-controls">
       <div className="scope-toolbar"><div className="scope-switch" role="group" aria-label="AI 处理范围"><button className={scope === 'selection' ? 'active' : ''} onClick={() => setScope('selection')}>{t('selectedScope')}{selections.length > 0 && <span>{selections.length}</span>}</button><button className={scope === 'document' ? 'active' : ''} onClick={() => setScope('document')}>{t('documentScope')}</button><button disabled={activeProjectId === looseFilesId} className={scope === 'combination' ? 'active' : ''} onClick={() => setScope('combination')}>对组合</button></div></div>
-      <div className="action-grid"><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('translate')}><Languages /><span>{t('translate')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('explain')}><MessageSquareText /><span>{t('explain')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('insight')}><Lightbulb /><span>{t('insight')}</span></button><button disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi('summarize')}><FileText /><span>{t('summarize')}</span></button></div>
+      <div className="action-grid">{aiActions.map(([action, Icon]) => <button key={action} disabled={!!busy || currentAiBusy || (scope === 'selection' && !selectionReady)} onClick={() => runAi(action)}><Icon /><span>{t(action)}</span></button>)}</div>
     </section>
     <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => { if (event.ctrlKey) { event.preventDefault(); setAiFontSize((value) => Math.max(10, Math.min(26, value + (event.deltaY < 0 ? 1 : -1)))); return } stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode) }} onScroll={(event) => trackChatPosition(event.currentTarget)}>
       <section className="conversation">
-        {history.map((message) => message.role === 'user'
-          ? <div className="user-event" key={message.id}><span>{message.label}</span><small>{message.content.slice(0, 80)}{message.content.length > 80 ? '…' : ''}</small><button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div>
-          : <article className="answer-card" key={message.id}>
-              <div className="answer-actions"><CopyMessageButton content={message.content} copyLabel={t('copy')} /><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div>
-              <div className="markdown" onClick={(event) => {
-                const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#raid-reference-"]')
-                if (!link) return
-                const number = referenceNumberFromHref(link.getAttribute('href'))
-                const reference = message.references?.find((item) => item.number === number)
-                if (!reference) return
-                event.preventDefault(); openReference(reference)
-              }}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} urlTransform={defaultUrlTransform}>{normalizeAssistantMarkdown(message.content, message.references)}</ReactMarkdown></div>
-            </article>)}
+        <ConversationMessages history={history} deleteMessage={deleteMessage} openReference={openReference} />
         {currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}
         <div ref={resultsEndRef} />
       </section>

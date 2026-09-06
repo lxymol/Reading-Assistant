@@ -6,7 +6,41 @@ import { createReferences, validateReference } from '../src/services/citationSer
 import { createTag, tagsWithoutFile } from '../src/services/tagStore.ts'
 import { inlineCitationsToMarkdown, referenceNumberFromHref } from '../src/services/inlineCitation.ts'
 import { analyzePageLayout } from '../src/services/layoutAnalyzer.ts'
-import type { DocumentParagraph, ReaderLocation, RuntimeProject } from '../src/types.ts'
+import { normalizeAssistantMath } from '../src/services/markdownMath.ts'
+import { boundSelectionPreviews } from '../src/services/selectionImageCache.ts'
+import { readAiStream, recentSelectionHistory } from '../src/services/aiResponse.ts'
+import type { CapturedSelection, ChatMessage, DocumentParagraph, ReaderLocation, RuntimeProject } from '../src/types.ts'
+
+test('AI stream preserves split UTF-8, CRLF boundaries and a final event without a newline', async () => {
+  const bytes = new TextEncoder().encode('\n{"type":"delta","delta":"中文"}\r\n{"type":"done","content":"中文"}')
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { for (const byte of bytes) controller.enqueue(new Uint8Array([byte])); controller.close() },
+  })
+  const deltas: string[] = []
+  const done = await readAiStream(new Response(body), (event) => { if (event.type === 'delta') deltas.push(event.delta) })
+  assert.equal(deltas.join(''), '中文')
+  assert.equal(done.content, '中文')
+})
+
+test('AI stream reports HTTP errors, server errors and incomplete responses', async () => {
+  await assert.rejects(readAiStream(new Response('{"error":"Unavailable"}', { status: 503 }), () => {}), /Unavailable/)
+  await assert.rejects(readAiStream(new Response('{"type":"error","error":"Failed"}\n'), () => {}), /Failed/)
+  await assert.rejects(readAiStream(new Response('{"type":"delta","delta":"Partial"}\n'), () => {}), /before completion/)
+})
+
+test('selection history retains context boundaries and caps prompts', () => {
+  const messages: ChatMessage[] = [
+    { id: '1', role: 'user', label: '选区', content: 'Excerpt', prompt: 'Explain' },
+    { id: '2', role: 'assistant', content: 'Explanation' },
+    { id: '3', role: 'user', contextMode: 'document', content: 'Whole document' },
+    { id: '4', role: 'assistant', content: 'Document answer' },
+    { id: '5', role: 'assistant', citationsDisabled: true, content: 'x'.repeat(5000) },
+  ]
+  const result = recentSelectionHistory(messages)
+  assert.equal(result.length, 3)
+  assert.equal(result[0].content, 'Explain\n【当时选区】\nExcerpt')
+  assert.equal(result[2].content.length, 4000)
+})
 
 const paragraph = (fileId: string, order: number, text: string): DocumentParagraph => ({
   id: `${fileId}:p${order}`, projectId: 'project', fileId, page: order + 1,
@@ -22,6 +56,26 @@ const project: RuntimeProject = {
     { id: 'right', projectId: 'project', name: 'results.pdf', kind: 'pdf', type: 'application/pdf', size: 1, lastModified: 1, createdAt: 1, updatedAt: 1, readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], indexState: { status: 'ready', version: 1 }, paragraphs: [paragraph('right', 0, 'graph neural network improves benchmark accuracy'), paragraph('right', 1, 'ablation and limitations')] },
   ],
 }
+
+test('streaming math remains a math block and drops standalone separator artifacts', () => {
+  assert.equal(normalizeAssistantMath('推导：\n$$\na+b\n|'), '推导：\n$$\na+b\n$$')
+  assert.equal(normalizeAssistantMath('```text\n$$ unchanged\n```'), '```text\n$$ unchanged\n```')
+  assert.equal(normalizeAssistantMath('\\[x^2\\]'), '\n$$\nx^2\n$$\n')
+})
+
+test('selection preview budget removes only old thumbnails, not logical selections', () => {
+  const selection = (id: string): CapturedSelection => ({
+    id, image: id, images: [{ preview: id, cacheId: `${id}-cache` }], page: 1,
+    regions: [{ page: 1, region: { left: 0, top: 0, width: 1, height: 1 } }],
+    text: id, textParts: [id], loading: false,
+  })
+  const bounded = boundSelectionPreviews([selection('old'), selection('middle'), selection('new')], 2)
+  assert.equal(bounded.length, 3)
+  assert.equal(bounded[0].images[0].preview, '')
+  assert.equal(bounded[1].images[0].preview, 'middle')
+  assert.equal(bounded[2].images[0].preview, 'new')
+  assert.equal(bounded[0].images[0].cacheId, 'old-cache')
+})
 
 test('navigation records only explicit jumps and supports cross-file backtracking', async () => {
   const service = new NavigationService()

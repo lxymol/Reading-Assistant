@@ -32,6 +32,7 @@ export default function ProjectExplorer(props: Props) {
   const combinationNodes = useRef(new Map<string, HTMLElement>())
   const renameInputRef = useRef<HTMLInputElement | null>(null)
   const createSignalRef = useRef(props.createSignal)
+  const renamingId = renaming?.id
   const toggle = (setter: typeof setCollapsed, id: string) => setter((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
   const toggleOnRelease = (event: ReactPointerEvent<HTMLElement>, setter: typeof setCollapsed, id: string) => {
     event.stopPropagation()
@@ -93,13 +94,13 @@ export default function ProjectExplorer(props: Props) {
   }, [props.createSignal]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useLayoutEffect(() => {
-    if (!renaming) return
+    if (!renamingId) return
     const frame = requestAnimationFrame(() => {
       renameInputRef.current?.focus()
       renameInputRef.current?.select()
     })
     return () => cancelAnimationFrame(frame)
-  }, [renaming])
+  }, [renamingId])
 
   const renderFile = (project: Combination, file: FileItem) => {
     const chats = project.conversations.filter((item) => item.ownerType === 'file' && item.fileId === file.id)

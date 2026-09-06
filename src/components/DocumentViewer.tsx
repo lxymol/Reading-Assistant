@@ -11,6 +11,7 @@ import AnnotationLayer from './AnnotationLayer'
 import type { AnnotationTool, DocumentAnnotation, DocumentHighlight, DocumentTag, NormalizedRegion, SelectionResult, SourceFile, TextAnnotation } from '../types'
 import { destroyPdf, loadPdf, type DocumentReference } from '../lib/pdf'
 import { useI18n } from '../i18n'
+import { cacheSelectionCanvas } from '../services/selectionImageCache'
 
 type Props = {
   source: SourceFile
@@ -267,6 +268,55 @@ function drawAnnotationsIntoCrop(context: CanvasRenderingContext2D, pageAnnotati
   context.restore()
 }
 
+function cropRenderedPage(canvas: HTMLCanvasElement, region: SelectionRect) {
+  const sourceWidth = Math.max(1, Math.round(region.width * canvas.width))
+  const sourceHeight = Math.max(1, Math.round(region.height * canvas.height))
+  const outputScale = Math.min(1, 2600 / Math.max(sourceWidth, sourceHeight))
+  const crop = document.createElement('canvas')
+  crop.width = Math.max(1, Math.round(sourceWidth * outputScale))
+  crop.height = Math.max(1, Math.round(sourceHeight * outputScale))
+  crop.getContext('2d')?.drawImage(
+    canvas,
+    region.left * canvas.width,
+    region.top * canvas.height,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    crop.width,
+    crop.height,
+  )
+  return crop
+}
+
+async function renderPdfSelection(pdf: PDFDocumentProxy, pageNumber: number, zoom: number, region: SelectionRect) {
+  const page = await pdf.getPage(pageNumber)
+  try {
+    const displayViewport = page.getViewport({ scale: 0.82 * zoom })
+    const regionWidth = Math.max(1, displayViewport.width * region.width)
+    const regionHeight = Math.max(1, displayViewport.height * region.height)
+    const requestedScale = Math.min(window.devicePixelRatio || 1, 1.6)
+    const maximumPixels = 16_000_000
+    const outputScale = Math.min(requestedScale, 2600 / Math.max(regionWidth, regionHeight), Math.sqrt(maximumPixels / (regionWidth * regionHeight)))
+    const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
+    const crop = document.createElement('canvas')
+    crop.width = Math.max(1, Math.round(viewport.width * region.width))
+    crop.height = Math.max(1, Math.round(viewport.height * region.height))
+    const context = crop.getContext('2d')
+    if (!context) throw new Error('无法创建选区画布')
+    await page.render({
+      canvasContext: context,
+      canvas: crop,
+      viewport,
+      transform: [1, 0, 0, 1, -viewport.width * region.left, -viewport.height * region.top],
+      intent: 'display',
+    }).promise
+    return crop
+  } finally {
+    page.cleanup()
+  }
+}
+
 export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, tagMode, tags, onCreateTag, onMoveTag, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotations, onAnnotationsChange }: Props) {
   const { t, pack } = useI18n()
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
@@ -408,7 +458,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     runAutoScroll()
   }
 
-  const finishSelection = () => {
+  const finishSelection = async () => {
     stopAutoScroll()
     const stack = stackRef.current
     const rect = rectRef.current
@@ -419,11 +469,15 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     if (!stack || !rect || rect.width < 8 || rect.height < 8) return
 
     const stackBounds = stack.getBoundingClientRect()
-    const images: string[] = []
+    const images: SelectionResult['images'] = []
     const regions: SelectionResult['regions'] = []
-    stack.querySelectorAll<HTMLElement>('.selectable-page').forEach((pageElement) => {
-      const canvas = pageElement.querySelector('canvas')
-      if (!canvas) return
+    const pageElements = source.kind === 'pdf'
+      ? Array.from(stack.querySelectorAll<HTMLElement>('.lazy-pdf-page')).flatMap((shell) => {
+        const page = shell.querySelector<HTMLElement>('.selectable-page, .pdf-page-placeholder')
+        return page ? [page] : []
+      })
+      : Array.from(stack.querySelectorAll<HTMLElement>('.selectable-page'))
+    for (const pageElement of pageElements) {
       const bounds = pageElement.getBoundingClientRect()
       const pageBox = {
         left: bounds.left - stackBounds.left,
@@ -437,7 +491,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
         right: Math.min(rect.left + rect.width, pageBox.right),
         bottom: Math.min(rect.top + rect.height, pageBox.bottom),
       }
-      if (intersection.right <= intersection.left || intersection.bottom <= intersection.top) return
+      if (intersection.right <= intersection.left || intersection.bottom <= intersection.top) continue
 
       const cssWidth = bounds.width
       const cssHeight = bounds.height
@@ -447,31 +501,25 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
         width: (intersection.right - intersection.left) / cssWidth,
         height: (intersection.bottom - intersection.top) / cssHeight,
       }
-      const sourceWidth = Math.max(1, Math.round(relative.width * canvas.width))
-      const sourceHeight = Math.max(1, Math.round(relative.height * canvas.height))
-      const outputScale = Math.min(1, 2600 / Math.max(sourceWidth, sourceHeight))
-      const crop = document.createElement('canvas')
-      crop.width = Math.max(1, Math.round(sourceWidth * outputScale))
-      crop.height = Math.max(1, Math.round(sourceHeight * outputScale))
-      crop.getContext('2d')?.drawImage(
-        canvas,
-        relative.left * canvas.width,
-        relative.top * canvas.height,
-        sourceWidth,
-        sourceHeight,
-        0,
-        0,
-        crop.width,
-        crop.height,
-      )
+      const pageNumber = Number(pageElement.dataset.pageNumber)
+      const renderedCanvas = pageElement.matches('.selectable-page') && !pageElement.querySelector('.page-loader') ? pageElement.querySelector('canvas') : null
+      let crop: HTMLCanvasElement
+      try {
+        if (renderedCanvas?.width && renderedCanvas.height) crop = cropRenderedPage(renderedCanvas, relative)
+        else if (pdf && Number.isFinite(pageNumber)) crop = await renderPdfSelection(pdf, pageNumber, zoom, relative)
+        else continue
+      } catch {
+        continue
+      }
       const cropContext = crop.getContext('2d')
-      if (cropContext) drawAnnotationsIntoCrop(cropContext, annotations.filter((annotation) => annotation.page === Number(pageElement.dataset.pageNumber)), relative, crop.width, crop.height)
-      images.push(crop.toDataURL('image/jpeg', 0.94))
-      regions.push({ page: Number(pageElement.dataset.pageNumber), region: relative })
-    })
+      if (cropContext) drawAnnotationsIntoCrop(cropContext, annotations.filter((annotation) => annotation.page === pageNumber), relative, crop.width, crop.height)
+      try { images.push(await cacheSelectionCanvas(crop)) } catch { /* Skip an image that cannot be cached safely. */ }
+      crop.width = 0; crop.height = 0
+      if (images.length > regions.length) regions.push({ page: pageNumber, region: relative })
+    }
     if (images.length) {
       const annotationTexts = regions.map(({ page, region }) => annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && annotation.page === page && annotation.x <= region.left + region.width && annotation.x + annotation.width >= region.left && annotation.y <= region.top + region.height && annotation.y + (annotation.height ?? .1) >= region.top).map((annotation) => annotation.text.trim()).filter(Boolean).join('\n'))
-      onSelect({ image: images[0], images, page: regions[0].page, regions, annotationTexts })
+      onSelect({ image: images[0]?.preview || '', images, page: regions[0].page, regions, annotationTexts })
     }
   }
 
@@ -511,7 +559,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest('.text-action-popover')) return
     if (annotationMode || tagMode) return
-    if (areaSelectionEnabled) finishSelection()
+    if (areaSelectionEnabled) void finishSelection()
     else showTextActions()
   }
 
@@ -583,7 +631,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
   </div> : null
 
   return (
-    <div className={`document-stack ${tagMode ? 'tag-mode' : annotationMode ? 'annotation-mode' : areaSelectionEnabled ? 'continuous-selection' : 'text-selection-mode'}`} ref={stackRef} onPointerDownCapture={placeTag} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => areaSelectionEnabled && !annotationMode && !tagMode && finishSelection()}>
+    <div className={`document-stack ${tagMode ? 'tag-mode' : annotationMode ? 'annotation-mode' : areaSelectionEnabled ? 'continuous-selection' : 'text-selection-mode'}`} ref={stackRef} onPointerDownCapture={placeTag} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => { if (areaSelectionEnabled && !annotationMode && !tagMode) void finishSelection() }}>
       {source.kind === 'image'
         ? <ImagePage source={source} zoom={zoom} inverted={inverted} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         : pdf && Array.from({ length: pdf.numPages }, (_, index) => {
