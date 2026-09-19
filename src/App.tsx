@@ -3,9 +3,8 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import {
   BrainCircuit, ChevronLeft, ChevronRight, Combine, FileText, Languages, FolderOpen,
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
-  Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, X, Square, Tag,
+  Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, Undo2, X, Square, Tag,
 } from 'lucide-react'
-import { useOcr } from './hooks/useOcr'
 import { readAiStream, recentSelectionHistory } from './services/aiResponse'
 import ConversationMessages from './components/ConversationMessages'
 import ActivityBar from './components/ActivityBar'
@@ -13,10 +12,10 @@ import ProjectExplorer from './components/ProjectExplorer'
 import TagPanel from './components/TagPanel'
 import WorkspacePanel from './components/WorkspacePanel'
 import type { DocumentReference } from './lib/pdf'
-import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, DocumentParagraph, DocumentTag, ImportedSkill, IndexState, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, SourceFile, TextAnnotation } from './types'
+import type { AiAction, AiConfig, AnnotationTool, CapturedSelection, ChatMessage, Conversation, DocumentAnnotation, DocumentHighlight, DocumentParagraph, DocumentTag, ImportedSkill, IndexState, MemorySettings, NormalizedRegion, PanelId, PanelLayout, ReaderLocation, RuntimeProject, RuntimeProjectFile, SelectionResult, ShortcutAction, ShortcutSettings, SourceFile, TextAnnotation } from './types'
 import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type LanguagePack } from './i18n'
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
-import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadSkills, loadUserMemory } from './lib/preferences'
+import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadShortcutSettings, loadSkills, loadUserMemory } from './lib/preferences'
 import { projectRepository } from './services/projectRepository'
 import { retrievalService } from './services/retrievalService'
 import { createCitationContext, createReferences, validateReference } from './services/citationService'
@@ -24,6 +23,7 @@ import { boundSelectionPreviews, disposeSelectionImages, resolveSelectionImage }
 import { NavigationService } from './services/navigationService'
 import { ReaderController } from './services/readerController'
 import { createTag, tagsWithoutFile } from './services/tagStore'
+import { findShortcutAction, shortcutFromKeyboardEvent, shortcutFromMouseEvent } from './services/shortcuts'
 
 const DocumentViewer = lazy(() => import('./components/DocumentViewer'))
 const AiSettingsModal = lazy(() => import('./components/AiSettingsModal'))
@@ -91,7 +91,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [aiTasks, setAiTasks] = useState<Set<string>>(() => new Set())
   const [progress, setProgress] = useState('')
   const indexTasksRef = useRef(new Map<string, Promise<{ paragraphs: DocumentParagraph[]; state: IndexState }>>())
-  const recognize = useOcr(setProgress)
   const [error, setError] = useState('')
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -106,16 +105,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [annotationMode, setAnnotationMode] = useState(false)
   const [annotationTool, setAnnotationTool] = useState<AnnotationTool>('ink')
   const [annotationColor, setAnnotationColor] = useState('#2f6fed')
+  const [annotationStrokeWidth, setAnnotationStrokeWidth] = useState(() => Math.max(.001, Math.min(.012, Number(localStorage.getItem('reading-assistant-ink-width')) || .004)))
   const [tagMode, setTagMode] = useState(false)
   const [recentTagId, setRecentTagId] = useState<string | null>(null)
   const [navigationDepth, setNavigationDepth] = useState(0)
   const [panelLayouts, setPanelLayouts] = useState(() => normalizePanelZ(loadPanelLayouts()))
-  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'selection', 'tags', 'chat'])
+  const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'tags', 'chat'])
   const [activitySide, setActivitySide] = useState<'left' | 'right'>(() => localStorage.getItem('reading-assistant-activity-side') === 'right' ? 'right' : 'left')
   const [aiFontSize, setAiFontSize] = useState(() => Math.max(10, Math.min(26, Number(localStorage.getItem('reading-assistant-ai-font-size')) || 12)))
   const [quickOpenEnabled, setQuickOpenEnabled] = useState(false)
   const [createCombinationSignal, setCreateCombinationSignal] = useState(0)
+  const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings>(loadShortcutSettings)
+  const [selectionContextEnabled, setSelectionContextEnabled] = useState(() => localStorage.getItem('reading-assistant-selection-context') === 'true')
   const abortControllersRef = useRef(new Map<string, AbortController>())
+  const [aiTaskContexts, setAiTaskContexts] = useState<Map<string, { scope: 'selection' | 'document' | 'combination'; selectionContext: boolean }>>(() => new Map())
   const projectsRef = useRef(projects)
   const currentPageRef = useRef(currentPage)
   const visionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
@@ -123,6 +126,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const selectionReady = Boolean(selectedText || hasVisualSelection)
   const fileImportQueueRef = useRef<Promise<void>>(Promise.resolve())
   const openFilesRef = useRef<(files: File[], targetProjectId?: string | null) => Promise<void>>(async () => undefined)
+  const projectsReadyRef = useRef(false)
+  const pendingExternalFilesRef = useRef<File[]>([])
   const fileDragDepthRef = useRef(0)
   const resultsEndRef = useRef<HTMLDivElement>(null)
   const panelScrollRef = useRef<HTMLDivElement>(null)
@@ -325,6 +330,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }, [])
 
   useEffect(() => {
+    // Start and authenticate the local Codex bridge while the reader is idle so
+    // the first inline translation does not pay its process startup cost.
+    if (aiConfig.provider === 'codex') void fetch('/api/codex/status').catch(() => undefined)
+  }, [aiConfig.provider])
+
+  useEffect(() => {
     let active = true
     void projectRepository.list().then(async (records) => {
       const stored = await Promise.all(records.map((record) => projectRepository.get(record.id, true)))
@@ -332,14 +343,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       const now = Date.now()
       const next: RuntimeProject[] = stored.flatMap((project) => project ? [coolProject({ ...project, isLoose: project.id === looseFilesId || project.isLoose, files: project.files.map((file) => ({ ...file, sourceLoaded: false })), hydrated: true })] : [])
       if (!next.some((project) => project.id === looseFilesId)) next.unshift({ id: looseFilesId, name: '未分组文件', isLoose: true, files: [], conversations: [], activeConversationId: '', activeFileId: null, tags: [], createdAt: now, updatedAt: now, hydrated: true })
-      setProjects(() => {
-        try {
-          const order = JSON.parse(localStorage.getItem('reading-assistant-combination-order') || '[]') as string[]
-          const positions = new Map(order.map((id, index) => [id, index]))
-          next.sort((a, b) => (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER))
-        } catch { /* Keep repository order. */ }
-        return next
-      })
+      let ordered = next
+      try {
+        const order = JSON.parse(localStorage.getItem('reading-assistant-combination-order') || '[]') as string[]
+        const positions = new Map(order.map((id, index) => [id, index]))
+        ordered = [...next].sort((a, b) => (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER))
+      } catch { /* Keep repository order. */ }
+      projectsRef.current = ordered
+      setProjects(ordered)
+      projectsReadyRef.current = true
+      const pendingFiles = pendingExternalFilesRef.current.splice(0)
+      for (const file of pendingFiles) {
+        const task = fileImportQueueRef.current.then(() => openFilesRef.current([file], null))
+        fileImportQueueRef.current = task.catch(() => undefined)
+      }
     }).catch(() => undefined)
     return () => { active = false }
   }, [])
@@ -574,7 +591,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         size: readableFile.size, lastModified: readableFile.lastModified, createdAt: now, updatedAt: now,
         readingState: { page: 1, zoom: 1, scrollTop: 0 }, highlights: [], annotations: [], paragraphs: [],
         indexState: { status: 'pending', version: documentIndexVersion }, indexLoaded: true,
-        source: { name: readableFile.name, kind: fileKind, url: URL.createObjectURL(readableFile), file: readableFile }, pdf: null, sourceLoaded: true,
+        source: undefined, pdf: null, sourceLoaded: false,
       }
       project = { ...project, files: [...project.files, projectFile], activeConversationId: '', activeFileId: fileId, updatedAt: now, hydrated: true }
       await projectRepository.saveSource(project.id, fileId, readableFile)
@@ -589,6 +606,9 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       fileToOpen = hydrated.file
     }
     const openFileId = fileToOpen.id
+    for (const item of project.files) {
+      if (item.id !== openFileId && item.source?.url.startsWith('blob:')) URL.revokeObjectURL(item.source.url)
+    }
     project = {
       ...project,
       activeFileId: openFileId,
@@ -619,7 +639,9 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     if (!bridge?.takePendingOpenFiles || !bridge.onOpenFile) return
     const accept = (payload: { name: string; type: string; lastModified: number; data: Uint8Array }) => {
       const bytes = Uint8Array.from(payload.data)
-      void openFile(new File([bytes], payload.name, { type: payload.type, lastModified: payload.lastModified }))
+      const file = new File([bytes], payload.name, { type: payload.type, lastModified: payload.lastModified })
+      if (!projectsReadyRef.current) pendingExternalFilesRef.current.push(file)
+      else void openFile(file)
     }
     void bridge.takePendingOpenFiles().then((items) => items.forEach(accept))
     return bridge.onOpenFile(accept)
@@ -834,42 +856,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     })
   }
 
-  const onSelect = async (result: SelectionResult) => {
+  const onSelect = (result: SelectionResult) => {
     const selectionId = makeId()
-    const captured: CapturedSelection = { ...result, id: selectionId, text: '', textParts: result.images.map(() => ''), loading: true }
+    const captured: CapturedSelection = { ...result, id: selectionId, text: '', textParts: result.images.map(() => ''), loading: false }
     setSelections((items) => { const next = boundSelectionPreviews([...items, captured]); selectionsRef.current = next; return next })
     setScope('selection')
-    setBusy('ocr')
     setError('')
-    try {
-      const textParts: string[] = result.images.map(() => '')
-      for (let index = 0; index < result.regions.length; index += 1) {
-        const selectedRegion = result.regions[index]
-        let part = ''
-        if (source?.kind === 'pdf' && pdf) {
-          setProgress(t('readingPdfText'))
-          const { extractPdfRegionText } = await import('./lib/pdf')
-          part = await extractPdfRegionText(pdf, selectedRegion.page, selectedRegion.region)
-        }
-        if (!part && !visionAvailable) part = await recognize(await resolveSelectionImage(result.images[index]))
-        const annotationText = result.annotationTexts?.[index]?.trim() || ''
-        textParts[index] = [part, annotationText && `批注：${annotationText}`].filter(Boolean).join('\n')
-      }
-      const current = selectionsRef.current.find((item) => item.id === selectionId)
-      if (!current) return
-      const imageKey = (image: typeof result.images[number]) => image.cacheId || image.dataUrl || image.preview
-      const survivingParts = current.images.map((image) => textParts[result.images.findIndex((candidate) => imageKey(candidate) === imageKey(image))] || '')
-      const text = survivingParts.filter(Boolean).join('\n\n')
-      setSelections((items) => { const next = items.map((item) => item.id === selectionId ? { ...item, text, textParts: survivingParts, loading: false } : item); selectionsRef.current = next; return next })
-      if (text) setSelectedText((previous) => [previous, text].filter(Boolean).join('\n\n'))
-      if (!text && !visionAvailable) setError(t('noText'))
-    } catch (reason) {
-      setSelections((items) => { const next = items.map((item) => item.id === selectionId ? { ...item, loading: false } : item); selectionsRef.current = next; return next })
-      setError(reason instanceof Error ? `${t('ocrFailed')}: ${reason.message}` : t('ocrFailed'))
-    } finally {
-      setBusy('')
-      setProgress('')
-    }
   }
 
   const removeSelectionImage = (selectionId: string, imageIndex: number) => {
@@ -889,6 +881,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       const index = previous.indexOf(removedText)
       if (index < 0) return previous
       return `${previous.slice(0, index)}${previous.slice(index + removedText.length)}`.replace(/\n{3,}/g, '\n\n').trim()
+    })
+  }
+
+  const removeCapturedSelection = (selectionId: string) => {
+    const target = selectionsRef.current.find((item) => item.id === selectionId)
+    if (!target) return
+    disposeSelectionImages([target])
+    const nextSelections = selectionsRef.current.filter((item) => item.id !== selectionId)
+    selectionsRef.current = nextSelections
+    setSelections(nextSelections)
+    if (target.text) setSelectedText((previous) => {
+      const index = previous.indexOf(target.text)
+      if (index < 0) return previous
+      return `${previous.slice(0, index)}${previous.slice(index + target.text.length)}`.replace(/\n{3,}/g, '\n\n').trim()
     })
   }
 
@@ -1127,6 +1133,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       title: item.history.length ? item.title : actionLabel.slice(0, 32),
       history: visibleHistory,
     } : item))
+    setAiTaskContexts((items) => new Map(items).set(taskKey, { scope, selectionContext: scope === 'selection' && selectionContextEnabled }))
     setAiTasks((items) => new Set(items).add(taskKey))
     const requestController = new AbortController()
     abortControllersRef.current.set(taskKey, requestController)
@@ -1157,7 +1164,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           includeContext: targetUsesContext && Boolean(retrieval.context),
           contextMode,
           anchorPages: targetUsesContext ? [] : Array.from(new Set(selections.flatMap((item) => item.regions.map((region) => region.page)).concat(currentPage))),
-          history: targetUsesContext ? previousHistory.map(({ role, content, prompt }) => ({ role, content: role === 'user' ? prompt || content : content })) : recentSelectionHistory(previousHistory),
+          history: targetUsesContext ? previousHistory.map(({ role, content, prompt }) => ({ role, content: role === 'user' ? prompt || content : content })) : selectionContextEnabled ? recentSelectionHistory(previousHistory) : [],
           aiConfig,
           deepThinking: fastSelectionTranslation ? false : reasoningActive,
           responseLanguage: pack.aiLanguage,
@@ -1185,8 +1192,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((item) => item.id === assistantId ? { ...item, content: item.content ? `${item.content}\n\n⚠️ ${message}` : `⚠️ ${message}` } : item) }))
     } finally {
       abortControllersRef.current.delete(taskKey)
+      setAiTaskContexts((items) => { const next = new Map(items); next.delete(taskKey); return next })
       setAiTasks((items) => { const next = new Set(items); next.delete(taskKey); return next })
-      clearCapturedSelections()
     }
   }
 
@@ -1283,7 +1290,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         includeContext: false,
         history: [],
         aiConfig,
-        deepThinking: deepThinking && aiConfig.reasoningEnabled,
+        deepThinking: false,
+        fastTranslation: true,
         responseLanguage: pack.aiLanguage,
       }),
     })
@@ -1303,21 +1311,27 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setPanelLayouts((items) => ({ ...items, [id]: layout }))
   }
   const raisePanel = (id: PanelId) => setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], z: nextPanelZ(items) } }))
-  const togglePanel = (id: PanelId) => {
+  const togglePanel = useCallback((id: PanelId) => {
     if (id === 'tags' && panelLayouts.tags.open) setRecentTagId(null)
     setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], open: !items[id].open, z: nextPanelZ(items) } }))
-  }
+  }, [panelLayouts.tags.open])
   const updatePanelOrder = useCallback((next: PanelId[]) => setPanelOrder((current) => current.length === next.length && current.every((id, index) => id === next[index]) ? current : next), [])
   const toggleAnnotationMode = () => {
     setAnnotationMode((active) => {
       if (!active) {
-        setAreaSelectionEnabled(false)
         setTagMode(false)
         window.getSelection()?.removeAllRanges()
       }
       return !active
     })
   }
+  const undoLastInkStroke = () => setAnnotations((items) => {
+    let index = -1
+    for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      if (items[itemIndex].type === 'ink') { index = itemIndex; break }
+    }
+    return index < 0 ? items : items.filter((_, itemIndex) => itemIndex !== index)
+  })
   const toggleTagMode = () => {
     const next = !tagMode
     if (next) {
@@ -1325,12 +1339,43 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
     setTagMode(next)
   }
+  useEffect(() => {
+    const runShortcut = (action: ShortcutAction) => {
+      if (action === 'projects') togglePanel('projects')
+      if (action === 'tags' && source) togglePanel('tags')
+      if (action === 'chat' && source) togglePanel('chat')
+      if (action === 'annotation' && source) toggleAnnotationMode()
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (settingsOpen || event.repeat) return
+      const shortcut = shortcutFromKeyboardEvent(event)
+      const action = findShortcutAction(shortcutSettings, shortcut)
+      if (!action) return
+      const target = event.target
+      if (!event.ctrlKey && !event.altKey && !event.metaKey && target instanceof HTMLElement && target.matches('input,textarea,[contenteditable="true"]')) return
+      event.preventDefault(); event.stopPropagation(); runShortcut(action)
+    }
+    const onMouseDown = (event: MouseEvent) => {
+      if (settingsOpen) return
+      const action = findShortcutAction(shortcutSettings, shortcutFromMouseEvent(event))
+      if (!action) return
+      event.preventDefault(); event.stopPropagation(); runShortcut(action)
+    }
+    const onContextMenu = (event: MouseEvent) => {
+      if (settingsOpen) return
+      if (findShortcutAction(shortcutSettings, shortcutFromMouseEvent(event))) event.preventDefault()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('mousedown', onMouseDown, true)
+    window.addEventListener('contextmenu', onContextMenu, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true); window.removeEventListener('mousedown', onMouseDown, true); window.removeEventListener('contextmenu', onContextMenu, true) }
+  }, [shortcutSettings, source, panelLayouts, annotationMode, tagMode, settingsOpen, togglePanel])
   const panelPosition = (id: PanelId) => {
     const index = panelOrder.indexOf(id)
     return index < 0 ? Number.MAX_SAFE_INTEGER : index
   }
   const visiblePanelIds = (Object.keys(panelLayouts) as PanelId[])
-    .filter((id) => panelLayouts[id].open && (id === 'projects' || (id === 'tags' && projects.some((project) => project.tags.length)) || Boolean(source)))
+    .filter((id) => id !== 'selection' && panelLayouts[id].open && (id === 'projects' || (id === 'tags' && projects.some((project) => project.tags.length)) || Boolean(source)))
     .sort((first, second) => panelPosition(first) - panelPosition(second))
   const leftPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'left')
   const rightPanelIds = visiblePanelIds.filter((id) => panelLayouts[id].dock === 'right')
@@ -1513,10 +1558,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const tagContent = <TagPanel tags={projects.flatMap((project) => project.tags)} files={projects.flatMap((project) => project.files)} tagMode={tagMode} recentTagId={recentTagId} canGoBack={navigationDepth > 0} onToggleTagMode={toggleTagMode} onBack={() => void navigateBack()} onOpen={openTag} onRename={renameTag} onDelete={deleteTag} onDismissRecent={() => setRecentTagId(null)} />
 
   const selectionHasImages = selections.some((selection) => selection.images.length > 0)
+  const activeThinkingContext = aiTaskContexts.get(currentAiTaskKey)
+  const activeThinkingLabel = activeThinkingContext?.scope === 'selection' && !activeThinkingContext.selectionContext ? t('thinkingDirect') : t('thinking')
   const selectionContent = <div className="selection-panel-body single" ref={selectionBodyRef}><section className="selection-content-section">
     <div className="section-label"><span>{t('selectedContent')} · {selections.length}</span>{selections.length > 0 && <button onClick={clearCapturedSelections}><X size={14} /> {t('clear')}</button>}</div>
     {selections.length === 0 ? <div className="selection-empty"><MousePointer2 size={22} /></div> : <div className={`selection-result-split ${selectionHasImages ? 'with-images' : 'text-only'}`} ref={selectionSplitRef} style={selectionHasImages ? { gridTemplateRows: `minmax(72px, ${selectionSplitRatio}fr) 7px minmax(72px, ${1 - selectionSplitRatio}fr)` } : undefined}>{selectionHasImages && <div className="selection-image-pane" ref={selectionImagesRef}><div className="selection-strip">{selections.flatMap((selection) => selection.images.map((image, imageIndex) => <div className="selection-thumb" key={`${selection.id}-${imageIndex}`}>{image.preview ? <img src={image.preview} alt="选区预览" /> : <div className="selection-thumb-placeholder">P{selection.regions[imageIndex]?.page || selection.page}</div>}{selection.loading && <span><LoaderCircle className="spin" size={10} /></span>}<button className="remove-selection-image" onClick={() => removeSelectionImage(selection.id, imageIndex)}><X size={11} /></button></div>))}</div></div>}{selectionHasImages && <div className="section-resizer" role="separator" aria-label="调整选区图片与识别文字高度" aria-orientation="horizontal" title="拖动调整图片与识别文字高度" onPointerDown={startSelectionSplit} onPointerMove={moveSelectionSplit} onPointerUp={stopSelectionSplit} onPointerCancel={stopSelectionSplit} />}{busy === 'ocr' ? <div className="inline-loading selection-text-pane"><LoaderCircle className="spin" size={16} /> {progress}</div> : <textarea className="selection-text-pane" ref={selectionTextRef} value={selectedText} onChange={(e) => setSelectedText(e.target.value)} />}</div>}
   </section></div>
+
+  const selectionPromptAttachments = scope === 'selection' && (selections.length > 0 || selectedText) ? <div className="prompt-selection-context">
+    <div className="prompt-selection-items">
+      {selections.flatMap((selection) => selection.images.map((image, imageIndex) => <div className="prompt-selection-image" key={`${selection.id}-${imageIndex}`}>{image.preview ? <img src={image.preview} alt="选区" /> : <span>P{selection.regions[imageIndex]?.page || selection.page}</span>}<button onClick={() => removeSelectionImage(selection.id, imageIndex)} title="移除选区"><X size={10} /></button></div>))}
+      {selections.filter((selection) => selection.text && selection.images.length === 0).map((selection) => <div className="prompt-selection-text" key={selection.id}><TextCursorInput size={12} /><span>{selection.text.slice(0, 80)}{selection.text.length > 80 ? '…' : ''}</span><button onClick={() => removeCapturedSelection(selection.id)} title="移除文字选区"><X size={10} /></button></div>)}
+    </div>
+    <div className="prompt-selection-options"><button onClick={clearCapturedSelections}>清空</button></div>
+  </div> : null
 
   const chatContent = <div className="chat-panel-layout" style={{ '--ai-font-size': `${aiFontSize}px` } as CSSProperties}>
     <section className="ai-fixed-controls">
@@ -1526,12 +1581,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => { if (event.ctrlKey) { event.preventDefault(); setAiFontSize((value) => Math.max(10, Math.min(26, value + (event.deltaY < 0 ? 1 : -1)))); return } stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode) }} onScroll={(event) => trackChatPosition(event.currentTarget)}>
       <section className="conversation">
         <ConversationMessages history={history} deleteMessage={deleteMessage} openReference={openReference} />
-        {currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{t('thinking')}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}
+        {currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{activeThinkingLabel}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}
         <div ref={resultsEndRef} />
       </section>
       {error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}
     </div>
-    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'combination' ? '针对整个组合提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
+    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}{selectionPromptAttachments}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'combination' ? '针对整个组合提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><span className="prompt-mode-switches"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label>{scope === 'selection' && <label className="reasoning-switch" title="开启后附带最近的选区问答；关闭时速度更快"><input type="checkbox" checked={selectionContextEnabled} onChange={(event) => { setSelectionContextEnabled(event.target.checked); localStorage.setItem('reading-assistant-selection-context', String(event.target.checked)) }} /><span className="switch-track"><i /></span><BrainCircuit size={12} />上下文</label>}</span><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
   const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, tags: tagContent }
@@ -1552,7 +1607,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         hasSource={Boolean(source)}
         dark={dark}
         annotationActive={annotationMode}
-        labels={{ selection: t('selection'), conversations: t('conversations'), light: t('light'), dark: t('dark'), settings: t('settings') }}
+        labels={{ conversations: t('conversations'), light: t('light'), dark: t('dark'), settings: t('settings') }}
         onTogglePanel={togglePanel}
         onToggleAnnotation={toggleAnnotationMode}
         onToggleTheme={() => setDark((value) => !value)}
@@ -1572,6 +1627,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
                   <label className="annotation-color" title="批注颜色"><Palette size={13} /><input type="color" value={annotationColor} onChange={(event) => setAnnotationColor(event.target.value)} /></label>
                   <button className={annotationTool === 'text' ? 'active' : ''} onClick={() => setAnnotationTool('text')} title="文本批注"><Type size={14} /><span>文本</span></button>
                   <button className={annotationTool === 'ink' ? 'active' : ''} onClick={() => setAnnotationTool('ink')} title="墨迹"><PenLine size={14} /><span>墨迹</span></button>
+                  {annotationTool === 'ink' && <label className="annotation-width" title={`墨迹粗细 ${Math.round(annotationStrokeWidth * 1000)}`}><input type="range" min="1" max="12" step="1" value={annotationStrokeWidth * 1000} onChange={(event) => { const value = Number(event.target.value) / 1000; setAnnotationStrokeWidth(value); localStorage.setItem('reading-assistant-ink-width', String(value)) }} /></label>}
+                  <button disabled={!annotations.some((annotation) => annotation.type === 'ink')} onClick={undoLastInkStroke} title="撤回上一笔"><Undo2 size={14} /><span>撤回</span></button>
                   <button className={annotationTool === 'eraser' ? 'active' : ''} onClick={() => setAnnotationTool('eraser')} title="擦除整条笔画"><Eraser size={14} /><span>橡皮</span></button>
                 </div> : <div className="selection-mode-switch" role="group" aria-label="选择方式">
                   <button className={!areaSelectionEnabled ? 'active' : ''} onClick={() => setAreaSelectionEnabled(false)}><TextCursorInput size={14} /><span>{t('chooseText')}</span></button>
@@ -1588,7 +1645,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
                 <div className="zoom-control"><button onClick={() => setZoom((z) => Math.max(0.25, z - 0.1))}><Minus size={15} /></button><input aria-label="缩放倍率" type="text" inputMode="numeric" value={zoomInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setZoomInput(event.target.value.replace(/\D/g, ''))} onBlur={commitZoomInput} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setZoomInput(String(Math.round(zoom * 100))); event.currentTarget.blur() } }} /><span>%</span><button onClick={() => setZoom((z) => Math.min(5, z + 0.1))}><Plus size={15} /></button></div>
               </div>
             </div>
-            <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><Suspense fallback={<div className="viewer-state"><span className="spinner" /><p>{t('loadingPdf')}</p></div>}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} tagMode={tagMode} tags={(currentProject?.tags || []).filter((tag) => tag.fileId === activeFileId)} onCreateTag={addTagAt} onMoveTag={moveTag} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={setAnnotations} /></Suspense></div>
+            <div className="reader-scroll" ref={readerScrollRef} onScroll={onReaderScroll} onWheel={onReaderWheel}><Suspense fallback={<div className="viewer-state"><span className="spinner" /><p>{t('loadingPdf')}</p></div>}><DocumentViewer key={source.url} source={source} zoom={zoom} currentPage={currentPage} inverted={dark} areaSelectionEnabled={areaSelectionEnabled} tagMode={tagMode} tags={(currentProject?.tags || []).filter((tag) => tag.fileId === activeFileId)} onCreateTag={addTagAt} onMoveTag={moveTag} onPdfReady={onPdfReady} onSelect={onSelect} onTextAi={addTextToAi} onTextTranslate={translateTextInline} highlights={highlights} onHighlight={toggleHighlight} citationFocus={citationFocus} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotationStrokeWidth={annotationStrokeWidth} annotations={annotations} onAnnotationsChange={setAnnotations} /></Suspense></div>
           </>}</section>
         {rightPanelIds.length > 0 && <div className="dock-column dock-column-right"><div className="panel-resizer left" onPointerDown={(event) => startResize('right', rightDockWidth, event)} />{renderDockPanels(rightPanelIds)}</div>}
         {floatingPanelIds.map(renderPanel)}
@@ -1602,6 +1659,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           memorySettings={memorySettings}
           userMemory={userMemory}
           quickOpenEnabled={quickOpenEnabled}
+          shortcutSettings={shortcutSettings}
           onClose={() => setSettingsOpen(false)}
           onImportSkill={importSkillFolder}
           onRemoveSkill={removeSkill}
@@ -1619,6 +1677,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
               setError(reason instanceof Error ? reason.message : '无法更新右键快捷打开设置。')
             }
           }}
+          onShortcutSettingsChange={(settings) => { setShortcutSettings(settings); localStorage.setItem('reading-assistant-shortcuts', JSON.stringify(settings)) }}
           onSave={(config) => {
             setAiConfig(config)
             if (!config.reasoningEnabled) setDeepThinking(false)

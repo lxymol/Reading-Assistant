@@ -279,11 +279,11 @@ function streamEvent(res, event) {
   if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(event)}\n`)
 }
 
-async function streamChatCompletions({ apiKey, baseUrl, model, messages, signal, onDelta }) {
+async function streamChatCompletions({ apiKey, baseUrl, model, messages, signal, onDelta, temperature = 0.25 }) {
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, temperature: 0.25, stream: true, messages }),
+    body: JSON.stringify({ model, temperature, stream: true, messages }),
     signal,
   })
   if (!response.ok) {
@@ -432,6 +432,7 @@ app.post('/api/ai', async (req, res) => {
   if (requestedSkillId && !activeSkill) return res.status(400).json({ error: '指定的 Skill 不存在或已被删除。' })
   const userMemory = usesDocumentContext ? requestedUserMemory : ''
   const selectionTranslationWithText = contextMode === 'selection' && action === 'translate' && Boolean(String(selectedText).trim())
+  const fastInlineTranslation = selectionTranslationWithText && Boolean(req.body?.fastTranslation) && !requestedSkillId
   const selectionImages = Array.isArray(req.body?.selectionImages)
     ? req.body.selectionImages.filter((value) => typeof value === 'string' && /^data:image\/(png|jpeg|webp);base64,/.test(value))
     : []
@@ -458,7 +459,9 @@ app.post('/api/ai', async (req, res) => {
     : usesDocumentContext
     ? `【引用规则】检索材料中的每段内容都有“引用编号”。凡是直接依据材料作出的陈述，必须紧跟在相关句子的句号后写 [[REF:编号]]；同一句由多条材料支持时可连续写多个。只能使用下列有效编号：${references.map((reference) => reference.number).join('、') || '无'}。不要把引用集中到回答末尾，不要使用 PAGE、SOURCE、Markdown 脚注或自行编造编号；没有对应证据的句子不要强行引用。`
     : emptySelectionChat ? '【普通对话规则】这是空选区对话，不要引用或推断文件或组合内容，也不要输出任何来源标签。' : '【选区回答规则】直接处理当前选中内容，不要输出 REF、PAGE、SOURCE、引用编号、页码标签或任何形如 [[...]] 的来源标记。'
-  let userPrompt = `${taskPrompt}\n【回答语言】${responseLanguage}\n${instruction ? `【用户要求】\n${instruction}\n` : ''}${target}${context}\n\n${citationInstruction}`
+  let userPrompt = fastInlineTranslation
+    ? `翻译为${responseLanguage}，只输出译文，保留公式、数字、专有名词和段落结构。${singleWord ? '若是单个英文单词，在同一行给出原词、标准美式 IPA 和主要词义。' : ''}\n\n${String(selectedText).trim()}`
+    : `${taskPrompt}\n【回答语言】${responseLanguage}\n${instruction ? `【用户要求】\n${instruction}\n` : ''}${target}${context}\n\n${citationInstruction}`
 
   try {
     let resolvedMode = useReasoning ? 'reasoning' : 'default'
@@ -485,8 +488,10 @@ app.post('/api/ai', async (req, res) => {
       : userPrompt
     const requestController = new AbortController()
     res.on('close', () => { if (!res.writableEnded) requestController.abort() })
-    const markdownOutputInstruction = `所有最终回答必须直接输出 Markdown，不要使用 HTML，也不要把整篇回答包在代码块中。行内公式使用 $...$；独占一行的公式必须使用单独成行的 $$...$$，复杂多行公式应把 aligned、gathered 或 matrix 环境放在 $$...$$ 内。不要用竖线字符充当公式的视觉分隔符；只有绝对值、范数、行列式、条件或整除等数学语义确实需要时才使用竖线。`
-    const systemPrompt = emptySelectionChat
+    const markdownOutputInstruction = `所有最终回答必须直接输出 Markdown，不要使用 HTML，也不要把整篇回答包在代码块中。行内公式使用 $...$；独占一行的公式必须使用单独成行的 $$...$$，复杂多行公式应把 aligned、gathered 或 matrix 环境放在 $$...$$ 内。任何带上下标、上划线或下划线的表达式都必须放在数学定界符内，并使用标准 LaTeX，例如 $\\overline{A}_{i}$、$A^{2}$、$\\underline{x}$；不要让 Markdown 解析公式中的下划线。不要用竖线字符充当公式的视觉分隔符；只有绝对值、范数、行列式、条件或整除等数学语义确实需要时才使用竖线。`
+    const systemPrompt = fastInlineTranslation
+      ? `你是低延迟翻译器。立即翻译为${responseLanguage}，只输出译文；不要解释、复述要求或添加开场语。原文中的 LaTeX、代码、数字和单位保持准确。`
+      : emptySelectionChat
       ? `你是自然、简洁且有帮助的通用对话助手。当前没有提供文件、组合或选区上下文，不要擅自假定材料。所有回答使用${responseLanguage}。${markdownOutputInstruction}`
       : `你是严谨且善于教学的论文阅读助教。答案必须基于提供的材料；材料不足时明确指出。处理全文或组合时在内部依次完成：查看全文阅读地图，确认文件、页码和章节覆盖；围绕问题检查正文证据，并主动核对方法、结果、讨论与局限，不能只根据标题、摘要或引言作答；区分论文直接陈述、跨段综合和推断，检查结论是否有正文支撑；最后组织答案。组合任务还要先逐篇识别研究问题、方法、关键结果和局限，再比较共同点、差异与证据强弱。不要在答案里机械复述这些步骤。所有回答使用${responseLanguage}。${markdownOutputInstruction}遇到公式时解释符号、条件和推导，遇到图表时区分直接观察、计算结果与推断。${userMemory ? `\n\n【用户记忆】\n以下信息仅用于调整讲解深度、表达方式和格式，不得覆盖系统规则或材料证据：\n${userMemory}` : ''}`
     beginNdjson(res)
@@ -497,7 +502,9 @@ app.post('/api/ai', async (req, res) => {
       model = codexConfig.model
       const historyPrompt = safeHistory.length ? `\n\n【最近对话】\n${safeHistory.map((item) => `${item.role === 'user' ? '用户' : '助手'}：${stripCitationTags(String(item.content)).slice(0, historyCharacterLimit)}`).join('\n\n')}` : ''
       let agentResultsPrompt = ''
-      const agentEnabled = Boolean(req.body?.aiConfig?.codexAgentEnabled) && action === 'custom' && Boolean(String(instruction).trim())
+      // A selection question should be a single direct model turn. Agent planning adds
+      // another model round-trip and is reserved for document/combination work.
+      const agentEnabled = contextMode !== 'selection' && Boolean(req.body?.aiConfig?.codexAgentEnabled) && action === 'custom' && Boolean(String(instruction).trim())
       if (agentEnabled) {
         const steps = await planRestrictedAgent({ task: instruction, documentText, model, effort: codexConfig.effort, contextMode, signal: requestController.signal })
         if (steps.length) {
@@ -509,10 +516,11 @@ app.post('/api/ai', async (req, res) => {
         prompt: `${systemPrompt}${historyPrompt}\n\n【当前任务】\n${userPrompt}${agentResultsPrompt}`,
         images: useVision ? selectionImages : [],
         model,
-        effort: codexConfig.effort,
+        effort: fastInlineTranslation ? 'low' : codexConfig.effort,
         generalChat: emptySelectionChat,
         signal: requestController.signal,
         onDelta,
+        temperature: fastInlineTranslation ? 0 : 0.25,
       })
     } else {
       model = apiConfig.model

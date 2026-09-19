@@ -1,4 +1,5 @@
-import type { AiConfig, ImportedSkill, MemorySettings, PanelId, PanelLayout } from '../types'
+import type { AiConfig, ImportedSkill, MemorySettings, PanelId, PanelLayout, ShortcutSettings } from '../types'
+import { defaultShortcutSettings } from '../services/shortcuts'
 
 export const defaultAiConfig: AiConfig = {
   provider: 'api',
@@ -31,6 +32,7 @@ export const loadAiConfig = (): AiConfig => ({ ...defaultAiConfig, ...readJson<P
 export const loadDarkTheme = () => localStorage.getItem('reading-assistant-theme') === 'dark'
 export const loadMemorySettings = (): MemorySettings => ({ userMemoryEnabled: false, ...readJson<Partial<MemorySettings>>('reading-assistant-memory-settings', {}) })
 export const loadUserMemory = () => localStorage.getItem('reading-assistant-user-memory') || ''
+export const loadShortcutSettings = (): ShortcutSettings => ({ ...defaultShortcutSettings, ...readJson<Partial<ShortcutSettings>>('reading-assistant-shortcuts', {}) })
 export const loadSkills = (): ImportedSkill[] => {
   const value = readJson<unknown>('reading-assistant-skills', [])
   return Array.isArray(value) ? value as ImportedSkill[] : []

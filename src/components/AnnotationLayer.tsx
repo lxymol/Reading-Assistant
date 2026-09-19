@@ -7,6 +7,7 @@ type Props = {
   active: boolean
   tool: AnnotationTool
   color: string
+  strokeWidth: number
   annotations: DocumentAnnotation[]
   onChange: Dispatch<SetStateAction<DocumentAnnotation[]>>
 }
@@ -17,7 +18,7 @@ const defaultTextFontSize = 12
 const minimumTextWidth = 52
 const minimumTextHeight = 40
 
-export default function AnnotationLayer({ pageNumber, active, tool, color, annotations, onChange }: Props) {
+export default function AnnotationLayer({ pageNumber, active, tool, color, strokeWidth, annotations, onChange }: Props) {
   const layerRef = useRef<HTMLDivElement>(null)
   const drawRef = useRef<{ pointerId: number; points: AnnotationPoint[] } | null>(null)
   const moveRef = useRef<{ pointerId: number; id: string; clientX: number; clientY: number; x: number; y: number } | null>(null)
@@ -126,7 +127,7 @@ export default function AnnotationLayer({ pageNumber, active, tool, color, annot
     setDraftPoints([])
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     if (!drawing || drawing.pointerId !== event.pointerId || drawing.points.length < 2) return
-    const annotation: InkAnnotation = { id: makeId(), type: 'ink', page: pageNumber, color, strokeWidth: .004, points: drawing.points }
+    const annotation: InkAnnotation = { id: makeId(), type: 'ink', page: pageNumber, color, strokeWidth, points: drawing.points }
     onChange((items) => [...items, annotation])
   }
 
@@ -196,7 +197,7 @@ export default function AnnotationLayer({ pageNumber, active, tool, color, annot
   return <div ref={layerRef} className={`annotation-layer ${active ? `active tool-${tool}` : ''}`} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finishInk} onPointerCancel={finishInk}>
     <svg className="annotation-ink" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
       {pageAnnotations.filter((item): item is InkAnnotation => item.type === 'ink').map((item) => <path key={item.id} d={pathData(item.points)} stroke={item.color} strokeWidth={item.strokeWidth * 1000} />)}
-      {draftPoints.length > 1 && <path d={pathData(draftPoints)} stroke={color} strokeWidth={4} />}
+      {draftPoints.length > 1 && <path d={pathData(draftPoints)} stroke={color} strokeWidth={strokeWidth * 1000} />}
     </svg>
     {pageAnnotations.filter((item): item is TextAnnotation => item.type === 'text').map((item) => {
       const selected = active && selectedId === item.id

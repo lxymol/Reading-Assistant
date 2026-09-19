@@ -9,7 +9,7 @@ type Props = {
   pageNumber: number
   className?: string
   initialSize?: { width: number; height: number }
-  render: (canvas: HTMLCanvasElement) => Promise<void>
+  render: (canvas: HTMLCanvasElement, signal: AbortSignal) => Promise<void>
   onSelect: (selection: SelectionResult) => void
   selectionEnabled?: boolean
   inverted?: boolean
@@ -31,8 +31,9 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
     if (!canvas) return
     if (!hasContentRef.current) setRendering(true)
     const buffer = document.createElement('canvas')
+    const controller = new AbortController()
     Promise.resolve()
-      .then(() => { if (active) setRenderError(''); return render(buffer) })
+      .then(() => { if (!active) return; setRenderError(''); return render(buffer, controller.signal) })
       .then(() => {
         if (!active) return
         canvas.width = buffer.width
@@ -45,11 +46,14 @@ export default function SelectableCanvas({ pageNumber, className = '', initialSi
         hasContentRef.current = true
       })
       .catch((reason) => active && setRenderError(reason instanceof Error ? reason.message : '页面渲染失败'))
-      .finally(() => active && setRendering(false))
+      .finally(() => {
+        buffer.width = 0
+        buffer.height = 0
+        if (active) setRendering(false)
+      })
     return () => {
       active = false
-      buffer.width = 0
-      buffer.height = 0
+      controller.abort()
       canvas.width = 0
       canvas.height = 0
     }

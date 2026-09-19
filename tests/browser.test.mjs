@@ -44,6 +44,8 @@ try {
   const { targetId } = await call('Target.createTarget', { url: server.resolvedUrls.local[0] })
   const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true })
   await call('Runtime.enable', {}, sessionId)
+  // Target attachment can precede the initial navigation commit.
+  await pause(1000)
   const result = await call('Runtime.evaluate', { expression: `(async () => {
     const check = (value, message) => { if (!value) throw new Error(message) }
     const waitFor = async (predicate) => {
@@ -52,6 +54,130 @@ try {
     }
     await waitFor(() => document.querySelector('.empty-reader'))
     check(document.querySelector('.workspace'), 'Workspace missing')
+    // Exercise the actual Markdown renderer and loaded CSS, not renderToString alone.
+    const { default: React } = await import('/node_modules/.vite/deps/react.js')
+    const { default: ReactDOM } = await import('/node_modules/.vite/deps/react-dom_client.js')
+    const { default: ReactMarkdown } = await import('/node_modules/.vite/deps/react-markdown.js')
+    const { default: remarkMath } = await import('/node_modules/.vite/deps/remark-math.js')
+    const { default: rehypeKatex } = await import('/node_modules/.vite/deps/rehype-katex.js')
+    const mathHost = document.createElement('div')
+    mathHost.className = 'markdown'
+    document.body.append(mathHost)
+    const mathRoot = ReactDOM.createRoot(mathHost)
+    mathRoot.render(React.createElement(ReactMarkdown, { remarkPlugins: [remarkMath], rehypePlugins: [rehypeKatex] },
+      '$F=\\\\overline{(\\\\overline{AC}\\\\cdot\\\\overline{BD})(\\\\overline{BC}\\\\cdot\\\\overline{AB})}+\\\\underline{x}_{i}$'))
+    await waitFor(() => mathHost.querySelector('.katex'))
+    await document.fonts.ready
+    check(!mathHost.querySelector('.katex-error'), 'Formula failed to parse')
+    const rules = mathHost.querySelectorAll('.overline-line,.underline-line')
+    check(rules.length === 6, 'Nested overlines or underline missing')
+    for (const theme of ['light', 'dark']) {
+      for (const size of [12, 18, 24]) {
+        document.documentElement.dataset.theme = theme
+        mathHost.style.fontSize = size + 'px'
+        for (const line of rules) {
+          const style = getComputedStyle(line)
+          check(style.borderBottomStyle === 'solid' && parseFloat(style.borderBottomWidth) > 0,
+            'Accent border is invisible: renderer/CSS mismatch')
+          check(line.getBoundingClientRect().width > 3, 'Accent collapsed to a vertical stroke')
+        }
+      }
+    }
+    mathRoot.unmount()
+    mathHost.remove()
+    // Retain buffer references deliberately: release must not depend on GC.
+    const { default: SelectableCanvas } = await import('/src/components/SelectableCanvas.tsx')
+    const canvasHost = document.createElement('div')
+    document.body.append(canvasHost)
+    const canvasRoot = ReactDOM.createRoot(canvasHost)
+    const buffers = []
+    for (let cycle = 0; cycle < 20; cycle++) {
+      const render = async (canvas, signal) => {
+        check(!signal.aborted, 'Started an already cancelled render')
+        buffers.push(canvas)
+        canvas.width = 1200; canvas.height = 1600
+        canvas.getContext('2d').fillRect(0, 0, 20, 20)
+      }
+      canvasRoot.render(React.createElement(SelectableCanvas, { render, pageNumber: 1, onSelect: () => {} }))
+      await waitFor(() => buffers.length === cycle + 1 && !canvasHost.querySelector('.page-loader'))
+      check(buffers.every(canvas => canvas.width === 0 && canvas.height === 0), 'Completed render retained its pixel buffer')
+      check(canvasHost.querySelector('canvas').width === 1200, 'Released the displayed canvas prematurely')
+    }
+    let finishRender, renderSignal, lateBuffer
+    canvasRoot.render(React.createElement(SelectableCanvas, {
+      pageNumber: 1, onSelect: () => {},
+      render: async (canvas, signal) => {
+        lateBuffer = canvas; renderSignal = signal
+        await new Promise(resolve => { finishRender = resolve })
+        canvas.width = 1200; canvas.height = 1600
+      },
+    }))
+    await waitFor(() => finishRender)
+    const displayedCanvas = canvasHost.querySelector('canvas')
+    canvasRoot.unmount()
+    check(renderSignal.aborted, 'Unmount did not cancel pending rendering')
+    finishRender()
+    await waitFor(() => lateBuffer.width === 0 && lateBuffer.height === 0)
+    check(displayedCanvas.width === 0, 'Unmount retained displayed pixels')
+    canvasHost.remove()
+    // A real 120-page PDF must load only the reading window, then release
+    // page image/operator resources while repeatedly moving through the file.
+    const { default: DocumentViewer } = await import('/src/components/DocumentViewer.tsx')
+    const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '']
+    const kids = []
+    for (let i = 0; i < 120; i++) {
+      kids.push((objects.length + 1) + ' 0 R')
+      objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>')
+    }
+    objects[1] = '<< /Type /Pages /Count 120 /Kids [' + kids.join(' ') + '] >>'
+    const newline = String.fromCharCode(10)
+    let pdfData = '%PDF-1.4' + newline
+    const offsets = [0]
+    objects.forEach((body, index) => {
+      offsets.push(pdfData.length)
+      pdfData += (index + 1) + ' 0 obj' + newline + body + newline + 'endobj' + newline
+    })
+    const xref = pdfData.length
+    pdfData += 'xref' + newline + '0 ' + offsets.length + newline + '0000000000 65535 f ' + newline
+    pdfData += offsets.slice(1).map(offset => String(offset).padStart(10, '0') + ' 00000 n ' + newline).join('')
+    pdfData += 'trailer' + newline + '<< /Size ' + offsets.length + ' /Root 1 0 R >>' + newline + 'startxref' + newline + xref + newline + '%%EOF'
+    const pdfFile = new File([pdfData], 'memory-test.pdf', { type: 'application/pdf' })
+    const pdfUrl = URL.createObjectURL(pdfFile)
+    const pdfHost = document.createElement('div')
+    pdfHost.className = 'reader-scroll'
+    pdfHost.style.cssText = 'position:fixed;inset:0;width:800px;height:600px;overflow:auto;z-index:9999'
+    document.body.append(pdfHost)
+    const pdfRoot = ReactDOM.createRoot(pdfHost)
+    const requestedPages = new Set()
+    let openedPdf
+    pdfRoot.render(React.createElement(DocumentViewer, {
+      source: { kind: 'pdf', name: pdfFile.name, file: pdfFile, url: pdfUrl },
+      zoom: 1, currentPage: 1, inverted: false, areaSelectionEnabled: false,
+      tagMode: false, tags: [], highlights: [], annotations: [], citationFocus: null,
+      annotationMode: false, annotationTool: 'pen', annotationColor: '#000', annotationStrokeWidth: 2,
+      onPdfReady: pdf => {
+        openedPdf = pdf
+        const getPage = pdf.getPage.bind(pdf)
+        pdf.getPage = page => { requestedPages.add(page); return getPage(page) }
+      },
+      onSelect: () => {}, onTextAi: () => {}, onTextTranslate: async () => '',
+      onCreateTag: () => {}, onMoveTag: () => {}, onHighlight: () => {}, onAnnotationsChange: () => {},
+    }))
+    await waitFor(() => pdfHost.querySelector('canvas')?.width > 0 && !pdfHost.querySelector('.page-loader'))
+    check(requestedPages.size < 10, 'Offscreen placeholders loaded the entire PDF')
+    let maximumCanvasBytes = 0
+    for (let cycle = 0; cycle < 60; cycle++) {
+      const shells = pdfHost.querySelectorAll('.lazy-pdf-page')
+      shells[(cycle * 11) % 120].scrollIntoView({ block: 'start' })
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const canvasBytes = Array.from(pdfHost.querySelectorAll('canvas')).reduce((sum, canvas) => sum + canvas.width * canvas.height * 4, 0)
+      maximumCanvasBytes = Math.max(maximumCanvasBytes, canvasBytes)
+      check(canvasBytes < 72 * 1024 * 1024, 'PDF canvas allocation grew beyond the reading window')
+    }
+    pdfRoot.unmount()
+    await waitFor(() => openedPdf.loadingTask.destroyed)
+    pdfHost.remove()
+    URL.revokeObjectURL(pdfUrl)
     const { ProjectRepository } = await import('/src/services/projectRepository.ts')
     const repository = new ProjectRepository()
     const project = { id: 'browser-test', name: 'Test', files: [{ id: 'source', projectId: 'browser-test', name: 'test.txt', paragraphs: [] }], conversations: [], tags: [], updatedAt: 1 }
@@ -122,7 +248,7 @@ try {
     document.querySelector('.prompt-box button').click()
     await waitFor(() => document.querySelector('.file-chat-count')?.textContent === '1')
     window.fetch = originalFetch
-    return { ui: 'workspace and lazy conversation creation passed', storage: 'round-trip, commit, rollback, connection reuse, cascade deletion passed' }
+    return { ui: 'workspace and lazy conversation creation passed', memory: { canvasCycles: 20, pdfPageCount: 120, scrollCycles: 60, maximumCanvasBytes }, storage: 'round-trip, commit, rollback, connection reuse, cascade deletion passed' }
   })()`, awaitPromise: true, returnByValue: true }, sessionId)
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text)
   console.log(JSON.stringify(result.result.value))

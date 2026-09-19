@@ -75,16 +75,38 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
       }
     }
     const handleClose = () => onChangeRef.current({ ...layoutRef.current, open: false })
+    const forwardKeyDown = (event: KeyboardEvent) => {
+      const forwarded = new KeyboardEvent('keydown', {
+        key: event.key, code: event.code, ctrlKey: event.ctrlKey, altKey: event.altKey,
+        shiftKey: event.shiftKey, metaKey: event.metaKey, repeat: event.repeat, cancelable: true,
+      })
+      window.dispatchEvent(forwarded)
+      if (forwarded.defaultPrevented) { event.preventDefault(); event.stopPropagation() }
+    }
+    const forwardMouseEvent = (event: MouseEvent) => {
+      const forwarded = new MouseEvent(event.type, {
+        button: event.button, ctrlKey: event.ctrlKey, altKey: event.altKey,
+        shiftKey: event.shiftKey, metaKey: event.metaKey, cancelable: true,
+      })
+      window.dispatchEvent(forwarded)
+      if (forwarded.defaultPrevented) { event.preventDefault(); event.stopPropagation() }
+    }
     const themeObserver = new MutationObserver(() => {
       popup.document.documentElement.dataset.theme = document.documentElement.dataset.theme || 'light'
     })
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
     popup.addEventListener('resize', syncLayout)
     popup.addEventListener('beforeunload', handleClose)
+    popup.addEventListener('keydown', forwardKeyDown, true)
+    popup.addEventListener('mousedown', forwardMouseEvent, true)
+    popup.addEventListener('contextmenu', forwardMouseEvent, true)
     return () => {
       themeObserver.disconnect()
       popup.removeEventListener('resize', syncLayout)
       popup.removeEventListener('beforeunload', handleClose)
+      popup.removeEventListener('keydown', forwardKeyDown, true)
+      popup.removeEventListener('mousedown', forwardMouseEvent, true)
+      popup.removeEventListener('contextmenu', forwardMouseEvent, true)
       popup.readingAssistant?.setPanelDragging(false)
       popup.readingAssistant?.setDockZones(false, null)
       if (!popup.closed) popup.close()

@@ -25,8 +25,11 @@ const pdfAssets = () => ({
 })
 
 export default defineConfig({
+  // rehype-katex must render with the same KaTeX version as the imported CSS.
+  resolve: { dedupe: ['katex'] },
   plugins: [react(), pdfAssets()],
   server: {
+    watch: { ignored: ['**/RaidData*/**', '**/release*/**'] },
     port: 5173,
     proxy: { '/api': 'http://localhost:8787' },
   },

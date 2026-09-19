@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-2.0.0-3794ff)
+![Version](https://img.shields.io/badge/version-2.1.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid 是一款面向论文、教材和技术文档的轻量、可扩展 AI 阅读器。它将多文件组织、连续阅读、精确选区、OCR、批注、文档标签、基于检索的 AI 对话和用户自定义模型集中在一个克制的桌面工作区中。
@@ -72,7 +72,7 @@ Raid 使用检索增强上下文，但不要求建立向量数据库：
 
 Windows 用户可从 [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases) 下载安装程序。Raid 不修改系统环境变量，也不要求另行安装 Node.js。
 
-当前版本：`2.0.0`。
+当前版本：`2.1.0`。
 
 ## AI 配置
 
@@ -116,7 +116,7 @@ npm run build
 npm run desktop:pack
 ```
 
-Windows 安装包会生成到 `release-2.0.0`。
+Windows 安装包会生成到 `release-2.1.0`。
 
 ## 隐私与安全
 

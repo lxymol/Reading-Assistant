@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import katex from 'katex'
 import { NavigationService } from '../src/services/navigationService.ts'
 import { RetrievalService } from '../src/services/retrievalService.ts'
 import { createReferences, validateReference } from '../src/services/citationService.ts'
@@ -8,6 +9,7 @@ import { inlineCitationsToMarkdown, referenceNumberFromHref } from '../src/servi
 import { analyzePageLayout } from '../src/services/layoutAnalyzer.ts'
 import { normalizeAssistantMath } from '../src/services/markdownMath.ts'
 import { boundSelectionPreviews } from '../src/services/selectionImageCache.ts'
+import { findShortcutAction, shortcutFromKeyboardEvent, shortcutFromMouseEvent } from '../src/services/shortcuts.ts'
 import { readAiStream, recentSelectionHistory } from '../src/services/aiResponse.ts'
 import { repairClippedWordStart } from '../src/services/textSelection.ts'
 import type { CapturedSelection, ChatMessage, DocumentParagraph, ReaderLocation, RuntimeProject } from '../src/types.ts'
@@ -70,6 +72,19 @@ test('streaming math remains a math block and drops standalone separator artifac
   assert.equal(normalizeAssistantMath('推导：\n$$\na+b\n|'), '推导：\n$$\na+b\n$$')
   assert.equal(normalizeAssistantMath('```text\n$$ unchanged\n```'), '```text\n$$ unchanged\n```')
   assert.equal(normalizeAssistantMath('\\[x^2\\]'), '\n$$\nx^2\n$$\n')
+  assert.equal(normalizeAssistantMath('```math\n\\overline{A}_{i}\n```'), '\n$$\n\\overline{A}_{i}\n$$\n')
+  assert.equal(normalizeAssistantMath('其中 A_i 与 `\\underline{x}` 为变量。'), '其中 $A_i$ 与 $\\underline{x}$ 为变量。')
+  assert.equal(normalizeAssistantMath('比例为 \\frac{A_i}{b}。'), '比例为 $\\frac{A_i}{b}$。')
+  assert.equal(normalizeAssistantMath('F = (\\overline{AC \\cdot BD})(\\overline{BC \\cdot AB})'), 'F = ($\\overline{AC \\cdot BD}$)($\\overline{BC \\cdot AB}$)')
+  assert.equal(normalizeAssistantMath('嵌套：\\overline{\\mathrm{AC} \\cdot \\mathrm{BD}}。'), '嵌套：$\\overline{\\mathrm{AC} \\cdot \\mathrm{BD}}$。')
+  assert.equal(normalizeAssistantMath('\\begin{align}a&=b\\\\c&=d\\end{align}'), '\n$$\n\\begin{aligned}\na&=b\\\\c&=d\n\\end{aligned}\n$$\n')
+})
+
+test('KaTeX renders whole-expression overlines and indexed underlines', () => {
+  const overline = katex.renderToString(String.raw`F=\left(\overline{AC\cdot BD}\right)\left(\overline{BC\cdot AB}\right)`, { throwOnError: true })
+  const underline = katex.renderToString(String.raw`\underline{A}_{i}^{2}`, { throwOnError: true })
+  assert.equal((overline.match(/overline-line/g) || []).length, 2)
+  assert.match(underline, /underline-line/)
 })
 
 test('selection preview budget removes only old thumbnails, not logical selections', () => {
@@ -84,6 +99,13 @@ test('selection preview budget removes only old thumbnails, not logical selectio
   assert.equal(bounded[1].images[0].preview, 'middle')
   assert.equal(bounded[2].images[0].preview, 'new')
   assert.equal(bounded[0].images[0].cacheId, 'old-cache')
+})
+
+test('keyboard and mouse shortcuts use stable multi-key names', () => {
+  assert.equal(shortcutFromKeyboardEvent({ key: '1', ctrlKey: false, altKey: true, shiftKey: false, metaKey: false } as KeyboardEvent), 'Alt+1')
+  assert.equal(shortcutFromMouseEvent({ button: 2, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false } as MouseEvent), 'Mouse2')
+  assert.equal(findShortcutAction({ projects: '', tags: '', chat: 'Alt+1', annotation: 'Mouse2' }, 'Mouse2'), 'annotation')
+  assert.equal(findShortcutAction({ projects: '', tags: '', chat: '', annotation: '' }, ''), null)
 })
 
 test('navigation records only explicit jumps and supports cross-file backtracking', async () => {

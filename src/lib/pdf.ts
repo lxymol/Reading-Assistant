@@ -27,7 +27,8 @@ const prioritizedPages = (total: number, priorityPage = 1) => {
   return pages
 }
 
-export async function loadPdf(url: string): Promise<PDFDocumentProxy> {
+export async function loadPdf(url: string, signal?: AbortSignal): Promise<PDFDocumentProxy> {
+  if (signal?.aborted) throw abortError()
   const task = getDocument({
     url,
     cMapUrl: '/pdfjs-assets/cmaps/',
@@ -39,9 +40,19 @@ export async function loadPdf(url: string): Promise<PDFDocumentProxy> {
     disableAutoFetch: true,
     rangeChunkSize: 262_144,
   })
-  const document = await task.promise
-  loadingTasks.set(document, task)
-  return document
+  const cancel = () => { void task.destroy().catch(() => undefined) }
+  signal?.addEventListener('abort', cancel, { once: true })
+  try {
+    const document = await task.promise
+    if (signal?.aborted) throw abortError()
+    loadingTasks.set(document, task)
+    return document
+  } catch (reason) {
+    await task.destroy().catch(() => undefined)
+    throw reason
+  } finally {
+    signal?.removeEventListener('abort', cancel)
+  }
 }
 
 export function destroyPdf(document: PDFDocumentProxy) {

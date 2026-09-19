@@ -2,7 +2,8 @@ import { Bot, CheckCircle2, CircleHelp, Download, ExternalLink, Eye, EyeOff, Fol
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LanguagePack } from '../i18n'
 import { useI18n, type AppLanguage } from '../i18n'
-import type { AiConfig, AppUpdateInfo, ImportedSkill, MemorySettings } from '../types'
+import type { AiConfig, AppUpdateInfo, ImportedSkill, MemorySettings, ShortcutAction, ShortcutSettings } from '../types'
+import { shortcutFromKeyboardEvent, shortcutFromMouseEvent } from '../services/shortcuts'
 
 type SettingsTab = 'models' | 'advanced' | 'general'
 
@@ -15,6 +16,7 @@ type Props = {
   memorySettings: MemorySettings
   userMemory: string
   quickOpenEnabled: boolean
+  shortcutSettings: ShortcutSettings
   onClose: () => void
   onSave: (config: AiConfig) => void
   onImportSkill: () => Promise<boolean>
@@ -24,9 +26,10 @@ type Props = {
   onMemorySettingsChange: (settings: MemorySettings) => void
   onUserMemoryChange: (memory: string) => void
   onQuickOpenChange: (enabled: boolean) => Promise<void> | void
+  onShortcutSettingsChange: (settings: ShortcutSettings) => void
 }
 
-export default function AiSettingsModal({ value, serverConfigured, skills, language, languages, memorySettings, userMemory, quickOpenEnabled, onClose, onSave, onImportSkill, onRemoveSkill, onImportLanguage, onLanguageChange, onMemorySettingsChange, onUserMemoryChange, onQuickOpenChange }: Props) {
+export default function AiSettingsModal({ value, serverConfigured, skills, language, languages, memorySettings, userMemory, quickOpenEnabled, shortcutSettings, onClose, onSave, onImportSkill, onRemoveSkill, onImportLanguage, onLanguageChange, onMemorySettingsChange, onUserMemoryChange, onQuickOpenChange, onShortcutSettingsChange }: Props) {
   const { t, pack } = useI18n()
   const [tab, setTab] = useState<SettingsTab>('models')
   const [draft, setDraft] = useState(value)
@@ -43,6 +46,7 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
   const [startingCodexLogin, setStartingCodexLogin] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [recordingShortcut, setRecordingShortcut] = useState<ShortcutAction | null>(null)
   const loginPollRef = useRef<number | null>(null)
   const updateRequestedRef = useRef(false)
 
@@ -52,7 +56,7 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
       if (!window.readingAssistant?.checkForUpdates) throw new Error('Desktop update check unavailable')
       setUpdateInfo(await window.readingAssistant.checkForUpdates(force))
     } catch {
-      setUpdateInfo({ currentVersion: '2.0.0', author: 'xyLee', repositoryUrl: 'https://github.com/lxymol/Reading-Assistant', releaseUrl: 'https://github.com/lxymol/Reading-Assistant/releases/latest', updateAvailable: false, checkedAt: Date.now(), error: 'UPDATE_CHECK_FAILED' })
+      setUpdateInfo({ currentVersion: '2.1.0', author: 'xyLee', repositoryUrl: 'https://github.com/lxymol/Reading-Assistant', releaseUrl: 'https://github.com/lxymol/Reading-Assistant/releases/latest', updateAvailable: false, checkedAt: Date.now(), error: 'UPDATE_CHECK_FAILED' })
     } finally {
       setCheckingUpdate(false)
     }
@@ -61,6 +65,13 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
   const openExternal = (url: string) => {
     if (window.readingAssistant?.openExternal) void window.readingAssistant.openExternal(url)
     else window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
+  const updateShortcut = (action: ShortcutAction, shortcut: string) => {
+    const next = { ...shortcutSettings }
+    for (const key of Object.keys(next) as ShortcutAction[]) if (key !== action && shortcut && next[key] === shortcut) next[key] = ''
+    next[action] = shortcut
+    onShortcutSettingsChange(next)
   }
 
   const refreshCodexStatus = async () => {
@@ -261,7 +272,10 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
 
         {tab === 'general' && <div className="general-settings"><section className="import-settings"><div className="import-header"><div><h3>{t('languageSettings')}</h3><p>{t('languageImportHelp')}</p></div><button className="import-button" disabled={importing} onClick={() => runImport('language')}>{importing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{t('importLanguage')}</button></div>
           <div className="language-list">{languages.map((item) => <button key={item.code} className={language === item.code ? 'active' : ''} onClick={() => onLanguageChange(item.code)}><span>{item.label}</span><small>{item.code}</small>{language === item.code && <CheckCircle2 size={16} />}</button>)}</div>
-        </section><section className="memory-card quick-open-card"><label className="vision-toggle"><input type="checkbox" checked={quickOpenEnabled} disabled={!window.readingAssistant} onChange={(event) => void onQuickOpenChange(event.target.checked)} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Open with Raid' : '右键使用 Raid 打开'}</strong><small>{pack.code === 'en-US' ? 'Adds an “Open with Raid” item to the Windows file context menu.' : '在 Windows 文件右键菜单中添加“使用 Raid 打开”。卸载时会自动清理。'}</small></span></label></section>
+        </section><section className="memory-card shortcut-settings"><div className="shortcut-heading"><h3>{pack.code === 'en-US' ? 'Shortcuts' : '快捷键'}</h3><small>{pack.code === 'en-US' ? 'Click a field, then press a key combination or mouse button.' : '点击输入框后，按下组合键或鼠标按键。'}</small></div>{(['projects', 'tags', 'chat', 'annotation'] as ShortcutAction[]).map((action) => {
+          const labels: Record<ShortcutAction, string> = { projects: pack.code === 'en-US' ? 'Files' : '文件', tags: pack.code === 'en-US' ? 'Tags' : '标签', chat: pack.code === 'en-US' ? 'Chat' : '对话', annotation: pack.code === 'en-US' ? 'Annotation' : '批注' }
+          return <label className="shortcut-row" key={action}><span>{labels[action]}</span><input readOnly value={recordingShortcut === action ? (pack.code === 'en-US' ? 'Press shortcut…' : '请按快捷键…') : shortcutSettings[action]} placeholder={pack.code === 'en-US' ? 'Not set' : '未设置'} onFocus={() => setRecordingShortcut(action)} onKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (event.key === 'Escape') return setRecordingShortcut(null); const shortcut = shortcutFromKeyboardEvent(event); if (shortcut) { updateShortcut(action, shortcut); setRecordingShortcut(null); event.currentTarget.blur() } }} onMouseDown={(event) => { if (recordingShortcut !== action || event.button === 0) return; event.preventDefault(); event.stopPropagation(); updateShortcut(action, shortcutFromMouseEvent(event)); setRecordingShortcut(null); event.currentTarget.blur() }} onContextMenu={(event) => event.preventDefault()} /><button type="button" onClick={() => { updateShortcut(action, ''); setRecordingShortcut(null) }}>{pack.code === 'en-US' ? 'Clear' : '清除'}</button></label>
+        })}</section><section className="memory-card quick-open-card"><label className="vision-toggle"><input type="checkbox" checked={quickOpenEnabled} disabled={!window.readingAssistant} onChange={(event) => void onQuickOpenChange(event.target.checked)} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Open with Raid' : '右键使用 Raid 打开'}</strong><small>{pack.code === 'en-US' ? 'Adds an “Open with Raid” item to the Windows file context menu.' : '在 Windows 文件右键菜单中添加“使用 Raid 打开”。卸载时会自动清理。'}</small></span></label></section>
           <section className="memory-card app-info-card">
             <div className="app-info-heading"><h3>{pack.code === 'en-US' ? 'Raid version' : 'Raid 版本'}</h3><button className="update-refresh" type="button" disabled={checkingUpdate} onClick={() => void checkForUpdates(true)} title={pack.code === 'en-US' ? 'Check again' : '重新检查'}>{checkingUpdate ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}</button></div>
             <div className="version-grid"><span>{pack.code === 'en-US' ? 'Current version' : '当前版本'}</span><strong>{updateInfo ? `v${updateInfo.currentVersion}` : '—'}</strong><span>{pack.code === 'en-US' ? 'Latest version' : '最新版本'}</span><strong>{checkingUpdate && !updateInfo ? (pack.code === 'en-US' ? 'Checking…' : '检查中…') : updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : (pack.code === 'en-US' ? 'Unavailable' : '暂时无法获取')}</strong></div>

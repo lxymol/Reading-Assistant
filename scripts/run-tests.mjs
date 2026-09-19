@@ -12,6 +12,7 @@ const sources = [
   'src/services/citationService.ts', 'src/services/tagStore.ts', 'src/services/layoutAnalyzer.ts',
   'src/services/markdownMath.ts',
   'src/services/selectionImageCache.ts',
+  'src/services/shortcuts.ts',
 ]
 const compiler = spawnSync(process.execPath, [path.join(root, 'node_modules', 'typescript', 'bin', 'tsc'), ...sources, '--target', 'ES2022', '--module', 'ESNext', '--moduleResolution', 'Bundler', '--rewriteRelativeImportExtensions', '--outDir', output, '--types', 'node', '--skipLibCheck', '--esModuleInterop'], { cwd: root, stdio: 'inherit' })
 if (compiler.status !== 0) process.exit(compiler.status || 1)

@@ -29,6 +29,7 @@ class CodexAppServer {
   pending = new Map()
   listeners = new Set()
   stderr = ''
+  accountCache = null
 
   async ensureStarted() {
     if (this.ready) return this.ready
@@ -54,7 +55,7 @@ class CodexAppServer {
     child.once('exit', (code) => this.failAll(new Error(this.stderr.trim() || `Codex App Server 已退出（${code ?? 'unknown'}）`)))
     this.reader = readline.createInterface({ input: child.stdout })
     this.reader.on('line', (line) => this.onLine(line))
-    await this.request('initialize', { clientInfo: { name: 'raid_reader', title: 'Raid', version: '2.0.0' } }, false)
+    await this.request('initialize', { clientInfo: { name: 'raid_reader', title: 'Raid', version: '2.1.0' } }, false)
     this.notify('initialized', {})
   }
 
@@ -105,11 +106,15 @@ class CodexAppServer {
   }
 
   async account() {
+    if (this.accountCache && Date.now() - this.accountCache.checkedAt < 60_000) return this.accountCache.account
     const result = await this.request('account/read', { refreshToken: true })
-    return result?.account || null
+    const account = result?.account || null
+    this.accountCache = account ? { account, checkedAt: Date.now() } : null
+    return account
   }
 
   async startLogin() {
+    this.accountCache = null
     const result = await this.request('account/login/start', {
       type: 'chatgpt',
       appBrand: 'codex',
@@ -236,6 +241,7 @@ class CodexAppServer {
     if (this.process && !this.process.killed) this.process.kill()
     this.process = null
     this.ready = null
+    this.accountCache = null
   }
 }
 

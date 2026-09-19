@@ -1,0 +1,30 @@
+appId: cn.lxymol.readingassistant.test
+productName: Raid Test
+asar: true
+electronDist: node_modules/electron/dist
+extraMetadata:
+  version: 2.1.0-test.1
+directories:
+  output: release-test
+files:
+  - dist/**/*
+  - electron/**/*
+  - server/**/*
+  - package.json
+extraFiles:
+  - from: electron/TEST_BUILD
+    to: TEST_BUILD
+win:
+  target: nsis
+  icon: electron/app-icon.ico
+  electronLanguages:
+    - en-US
+    - zh-CN
+  artifactName: Raid-Test-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Raid Test
+  deleteAppDataOnUninstall: false

@@ -13,6 +13,7 @@ import { destroyPdf, loadPdf, type DocumentReference } from '../lib/pdf'
 import { repairClippedWordStart } from '../services/textSelection'
 import { useI18n } from '../i18n'
 import { cacheSelectionCanvas } from '../services/selectionImageCache'
+import { normalizeAssistantMath } from '../services/markdownMath'
 
 type Props = {
   source: SourceFile
@@ -34,11 +35,12 @@ type Props = {
   annotationMode: boolean
   annotationTool: AnnotationTool
   annotationColor: string
+  annotationStrokeWidth: number
   annotations: DocumentAnnotation[]
   onAnnotationsChange: Dispatch<SetStateAction<DocumentAnnotation[]>>
 }
 
-type AnnotationPageProps = Pick<Props, 'annotationMode' | 'annotationTool' | 'annotationColor' | 'annotations' | 'onAnnotationsChange'>
+type AnnotationPageProps = Pick<Props, 'annotationMode' | 'annotationTool' | 'annotationColor' | 'annotationStrokeWidth' | 'annotations' | 'onAnnotationsChange'>
 
 type VisibleHighlightRegion = NormalizedRegion & { color: string }
 
@@ -118,11 +120,12 @@ function TagMarkerLayer({ tags, active, onMove }: { tags: DocumentTag[]; active:
 function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highlights, citationFocus, tagMode, tags, onMoveTag, ...annotationProps }: { pdf: PDFDocumentProxy; pageNumber: number; zoom: number; inverted: boolean; textSelectionEnabled: boolean; highlights: DocumentHighlight[]; citationFocus: DocumentReference | null; tagMode: boolean; tags: DocumentTag[]; onMoveTag: Props['onMoveTag'] } & AnnotationPageProps) {
   const textLayerRef = useRef<HTMLDivElement>(null)
   const citationLayerRef = useRef<HTMLDivElement>(null)
-  const render = useCallback(async (canvas: HTMLCanvasElement) => {
+  const render = useCallback(async (canvas: HTMLCanvasElement, signal: AbortSignal) => {
     const page = await pdf.getPage(pageNumber)
+    if (signal.aborted) { page.cleanup(); return }
     const displayViewport = page.getViewport({ scale: 0.82 * zoom })
     const requestedScale = Math.min(window.devicePixelRatio || 1, 1.6)
-    const maximumPixels = 8_000_000
+    const maximumPixels = 2_000_000
     const outputScale = Math.min(requestedScale, Math.sqrt(maximumPixels / Math.max(1, displayViewport.width * displayViewport.height)))
     const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
     const context = canvas.getContext('2d')
@@ -131,7 +134,13 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     canvas.height = Math.max(1, Math.floor(viewport.height))
     canvas.style.width = `${displayViewport.width}px`
     canvas.style.height = `${displayViewport.height}px`
-    await page.render({ canvasContext: context, viewport, canvas, intent: 'display' }).promise
+    const task = page.render({ canvasContext: context, viewport, canvas, intent: 'display' })
+    const cancel = () => task.cancel()
+    signal.addEventListener('abort', cancel, { once: true })
+    try { await task.promise } finally {
+      signal.removeEventListener('abort', cancel)
+      page.cleanup()
+    }
   }, [pdf, pageNumber, zoom])
 
   useEffect(() => {
@@ -147,13 +156,19 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
       container.style.setProperty('--total-scale-factor', String(0.82 * zoom))
       container.style.setProperty('--scale-round-x', '1px')
       container.style.setProperty('--scale-round-y', '1px')
-      layer = new TextLayer({ textContentSource: await page.getTextContent(), container, viewport })
-      await layer.render()
-      const legacyHighlights = highlights.filter((item) => item.page === pageNumber && !item.regions?.length)
-      container.querySelectorAll('span').forEach((span) => {
-        const spanText = span.textContent?.trim() || ''
-        if (spanText && legacyHighlights.some((item) => item.text.includes(spanText) || spanText.includes(item.text))) span.classList.add('saved-highlight')
-      })
+      const content = await page.getTextContent()
+      if (!active) { page.cleanup(); return }
+      try {
+        layer = new TextLayer({ textContentSource: content, container, viewport })
+        await layer.render()
+        const legacyHighlights = highlights.filter((item) => item.page === pageNumber && !item.regions?.length)
+        container.querySelectorAll('span').forEach((span) => {
+          const spanText = span.textContent?.trim() || ''
+          if (spanText && legacyHighlights.some((item) => item.text.includes(spanText) || spanText.includes(item.text))) span.classList.add('saved-highlight')
+        })
+      } finally {
+        page.cleanup()
+      }
     }).catch(() => undefined)
     return () => { active = false; layer?.cancel(); container.replaceChildren() }
   }, [pdf, pageNumber, textSelectionEnabled, zoom, highlights])
@@ -181,20 +196,26 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     reveal()
     return () => { active = false }
   }, [focusedRegion])
-  return <SelectableCanvas pageNumber={pageNumber} initialSize={{ width: 500 * zoom, height: 710 * zoom }} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div ref={citationLayerRef} className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<TagMarkerLayer tags={tags.filter((tag) => tag.page === pageNumber)} active={tagMode} onMove={onMoveTag} /><div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /><TagPlacementLayer active={tagMode} /></>} />
+  return <SelectableCanvas pageNumber={pageNumber} initialSize={{ width: 500 * zoom, height: 710 * zoom }} render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><div className="saved-highlight-layer">{pageRegions.map((region, index) => <i key={index} style={{ left: `${region.left * 100}%`, top: `${region.top * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%`, background: region.color }} />)}</div>{focusedRegion && <div ref={citationLayerRef} className="citation-focus-layer"><i style={{ left: `${focusedRegion.left * 100}%`, top: `${focusedRegion.top * 100}%`, width: `${focusedRegion.width * 100}%`, height: `${focusedRegion.height * 100}%` }} /></div>}<TagMarkerLayer tags={tags.filter((tag) => tag.page === pageNumber)} active={tagMode} onMove={onMoveTag} /><div ref={textLayerRef} className={`text-layer ${textSelectionEnabled ? 'enabled' : ''}`} /><AnnotationLayer pageNumber={pageNumber} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} strokeWidth={annotationProps.annotationStrokeWidth} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /><TagPlacementLayer active={tagMode} /></>} />
 }
 
 function ImagePage({ source, zoom, inverted, tagMode, tags, onMoveTag, ...annotationProps }: { source: SourceFile; zoom: number; inverted: boolean; tagMode: boolean; tags: DocumentTag[]; onMoveTag: Props['onMoveTag'] } & AnnotationPageProps) {
-  const render = useCallback(async (canvas: HTMLCanvasElement) => {
+  const render = useCallback(async (canvas: HTMLCanvasElement, signal: AbortSignal) => {
     const image = new Image()
-    image.src = source.url
-    await image.decode()
-    canvas.width = image.naturalWidth
-    canvas.height = image.naturalHeight
-    canvas.style.width = `${Math.min(1100, image.naturalWidth) * zoom}px`
-    contextSafe(canvas)?.drawImage(image, 0, 0)
+    try {
+      image.src = source.url
+      await image.decode()
+      if (signal.aborted) return
+      const scale = Math.min(1, Math.sqrt(2_000_000 / Math.max(1, image.naturalWidth * image.naturalHeight)))
+      canvas.width = Math.max(1, Math.floor(image.naturalWidth * scale))
+      canvas.height = Math.max(1, Math.floor(image.naturalHeight * scale))
+      canvas.style.width = `${Math.min(1100, image.naturalWidth) * zoom}px`
+      contextSafe(canvas)?.drawImage(image, 0, 0, canvas.width, canvas.height)
+    } finally {
+      image.src = ''
+    }
   }, [source.url, zoom])
-  return <SelectableCanvas pageNumber={1} className="image-page" render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><TagMarkerLayer tags={tags} active={tagMode} onMove={onMoveTag} /><AnnotationLayer pageNumber={1} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /><TagPlacementLayer active={tagMode} /></>} />
+  return <SelectableCanvas pageNumber={1} className="image-page" render={render} onSelect={() => undefined} selectionEnabled={false} inverted={inverted} overlay={<><TagMarkerLayer tags={tags} active={tagMode} onMove={onMoveTag} /><AnnotationLayer pageNumber={1} active={annotationProps.annotationMode} tool={annotationProps.annotationTool} color={annotationProps.annotationColor} strokeWidth={annotationProps.annotationStrokeWidth} annotations={annotationProps.annotations} onChange={annotationProps.onAnnotationsChange} /><TagPlacementLayer active={tagMode} /></>} />
 }
 
 type PdfPageProps = Parameters<typeof PdfPage>[0]
@@ -222,15 +243,10 @@ function LazyPdfPage({ priority, ...props }: PdfPageProps & { priority: boolean 
         })
       }
       setNearViewport(entry.isIntersecting)
-    }, { root, rootMargin: '650px 0px' })
+    }, { root, rootMargin: '160px 0px' })
     observer.observe(shell)
     return () => observer.disconnect()
   }, [props.zoom])
-
-  useEffect(() => {
-    if (shouldRender) return
-    void props.pdf.getPage(pageNumber).then((page) => page.cleanup()).catch(() => undefined)
-  }, [pageNumber, props.pdf, shouldRender])
 
   return <div ref={shellRef} className="lazy-pdf-page">
     {shouldRender
@@ -297,7 +313,7 @@ async function renderPdfSelection(pdf: PDFDocumentProxy, pageNumber: number, zoo
     const regionWidth = Math.max(1, displayViewport.width * region.width)
     const regionHeight = Math.max(1, displayViewport.height * region.height)
     const requestedScale = Math.min(window.devicePixelRatio || 1, 1.6)
-    const maximumPixels = 8_000_000
+    const maximumPixels = 4_000_000
     const outputScale = Math.min(requestedScale, 2600 / Math.max(regionWidth, regionHeight), Math.sqrt(maximumPixels / (regionWidth * regionHeight)))
     const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
     const crop = document.createElement('canvas')
@@ -318,7 +334,7 @@ async function renderPdfSelection(pdf: PDFDocumentProxy, pageNumber: number, zoo
   }
 }
 
-export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, tagMode, tags, onCreateTag, onMoveTag, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotations, onAnnotationsChange }: Props) {
+export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, tagMode, tags, onCreateTag, onMoveTag, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotationStrokeWidth, annotations, onAnnotationsChange }: Props) {
   const { t, pack } = useI18n()
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [error, setError] = useState('')
@@ -333,12 +349,15 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
   const [translating, setTranslating] = useState(false)
   const [copied, setCopied] = useState(false)
   const dragRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null)
+  const nativeSelectionStartPageRef = useRef<number | null>(null)
+  const [nativeSelectionPages, setNativeSelectionPages] = useState<Set<number>>(() => new Set())
   const translationControllerRef = useRef<AbortController | null>(null)
   useEffect(() => {
     if (source.kind !== 'pdf') return
     let active = true
     let opened: PDFDocumentProxy | null = null
-    loadPdf(source.url)
+    const controller = new AbortController()
+    loadPdf(source.url, controller.signal)
       .then((document) => {
         opened = document
         if (!active) return void destroyPdf(document)
@@ -347,6 +366,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       .catch((reason) => active && setError(reason instanceof Error ? reason.message : (pack.code === 'en-US' ? 'Failed to load PDF' : 'PDF 加载失败')))
     return () => {
       active = false
+      controller.abort()
       const document = opened
       if (document) window.setTimeout(() => void destroyPdf(document), 0)
     }
@@ -359,6 +379,8 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       setTextAction(null)
       setTranslation('')
       setTranslating(false)
+      nativeSelectionStartPageRef.current = null
+      setNativeSelectionPages(new Set())
       window.getSelection()?.removeAllRanges()
     })
     return () => cancelAnimationFrame(frame)
@@ -425,6 +447,14 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     if (!areaSelectionEnabled && !annotationMode && textAction && !(event.target as HTMLElement).closest('.text-action-popover')) {
       translationControllerRef.current?.abort(); translationControllerRef.current = null
       setTextAction(null); setTranslation(''); setTranslating(false); window.getSelection()?.removeAllRanges()
+      setNativeSelectionPages(new Set())
+    }
+    if (!areaSelectionEnabled && !annotationMode && !tagMode && event.button === 0) {
+      const page = Number((event.target as HTMLElement).closest<HTMLElement>('.selectable-page')?.dataset.pageNumber)
+      if (Number.isFinite(page) && page > 0) {
+        nativeSelectionStartPageRef.current = page
+        setNativeSelectionPages(new Set([page]))
+      }
     }
     if (annotationMode || tagMode || !areaSelectionEnabled || event.button !== 0 || !(event.target as HTMLElement).closest('.selectable-page')) return
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -566,7 +596,10 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     if ((event.target as HTMLElement).closest('.text-action-popover')) return
     if (annotationMode || tagMode) return
     if (areaSelectionEnabled) void finishSelection()
-    else showTextActions()
+    else {
+      nativeSelectionStartPageRef.current = null
+      showTextActions()
+    }
   }
 
   const translateSelectedText = async () => {
@@ -598,6 +631,7 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
     setTextAction(null)
     setTranslation('')
     setTranslating(false)
+    setNativeSelectionPages(new Set())
     window.getSelection()?.removeAllRanges()
   }
 
@@ -632,17 +666,23 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       <button className="close-text-action" onClick={closeTextAction}><X size={14} /></button>
     </div>
     {(translating || translation) && <div className="inline-translation">
-      {translation ? <div className="inline-translation-markdown markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{translation}</ReactMarkdown>{translating && <LoaderCircle className="spin inline-stream-indicator" size={13} />}</div> : <><LoaderCircle className="spin" size={15} /> {pack.code === 'en-US' ? 'Translating…' : '正在翻译…'}</>}
+      {translation ? <div className="inline-translation-markdown markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{normalizeAssistantMath(translation)}</ReactMarkdown>{translating && <LoaderCircle className="spin inline-stream-indicator" size={13} />}</div> : <><LoaderCircle className="spin" size={15} /> {pack.code === 'en-US' ? 'Translating…' : '正在翻译…'}</>}
     </div>}
   </div> : null
 
   return (
-    <div className={`document-stack ${tagMode ? 'tag-mode' : annotationMode ? 'annotation-mode' : areaSelectionEnabled ? 'continuous-selection' : 'text-selection-mode'}`} ref={stackRef} onPointerDownCapture={placeTag} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => { if (areaSelectionEnabled && !annotationMode && !tagMode) void finishSelection() }}>
+    <div className={`document-stack ${tagMode ? 'tag-mode' : annotationMode ? 'annotation-mode' : areaSelectionEnabled ? 'continuous-selection' : 'text-selection-mode'}`} ref={stackRef} onPointerDownCapture={placeTag} onPointerDown={onPointerDown} onPointerMove={(event) => {
+      if (nativeSelectionStartPageRef.current !== null && !areaSelectionEnabled && !annotationMode && !tagMode) {
+        const page = Number((event.target as HTMLElement).closest<HTMLElement>('.selectable-page')?.dataset.pageNumber)
+        if (Number.isFinite(page) && page > 0 && !nativeSelectionPages.has(page)) setNativeSelectionPages((pages) => new Set(pages).add(page))
+      }
+      onPointerMove(event)
+    }} onPointerUp={onPointerUp} onPointerCancel={() => { nativeSelectionStartPageRef.current = null; if (areaSelectionEnabled && !annotationMode && !tagMode) void finishSelection() }}>
       {source.kind === 'image'
-        ? <ImagePage source={source} zoom={zoom} inverted={inverted} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
+        ? <ImagePage source={source} zoom={zoom} inverted={inverted} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotationStrokeWidth={annotationStrokeWidth} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         : pdf && Array.from({ length: pdf.numPages }, (_, index) => {
           const pageNumber = index + 1
-          return <LazyPdfPage key={pageNumber} priority={Math.abs(pageNumber - currentPage) <= 1} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
+          return <LazyPdfPage key={pageNumber} priority={Math.abs(pageNumber - currentPage) <= 1 || nativeSelectionPages.has(pageNumber)} pdf={pdf} pageNumber={pageNumber} zoom={zoom} inverted={inverted} textSelectionEnabled={!areaSelectionEnabled && !annotationMode && !tagMode} highlights={highlights} citationFocus={citationFocus} tagMode={tagMode} tags={tags} onMoveTag={onMoveTag} annotationMode={annotationMode} annotationTool={annotationTool} annotationColor={annotationColor} annotationStrokeWidth={annotationStrokeWidth} annotations={annotations} onAnnotationsChange={onAnnotationsChange} />
         })}
       {selectionRect && <div className="document-selection-rect" style={selectionRect} />}
       {textActionPopover && createPortal(textActionPopover, document.body)}

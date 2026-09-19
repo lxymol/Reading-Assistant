@@ -30,6 +30,8 @@ export type AiConfig = {
 
 export type ImportedSkill = { id: string; name: string; command: string; description: string; instructions: string; sourcePath: string }
 export type MemorySettings = { userMemoryEnabled: boolean }
+export type ShortcutAction = 'projects' | 'tags' | 'chat' | 'annotation'
+export type ShortcutSettings = Record<ShortcutAction, string>
 export type DocumentHighlight = { id: string; page: number; text: string; color: string; regions?: SelectionResult['regions'] }
 export type AnnotationPoint = { x: number; y: number }
 export type InkAnnotation = { id: string; type: 'ink'; page: number; color: string; strokeWidth: number; points: AnnotationPoint[] }

@@ -1,10 +1,10 @@
-import { BookOpen, BrainCircuit, FolderOpen, Moon, MousePointer2, Pen, Settings2, Sun, Tag } from 'lucide-react'
+import { BookOpen, BrainCircuit, FolderOpen, Moon, Pen, Settings2, Sun, Tag } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import type { PanelId } from '../types'
 
-type ActivityId = 'projects' | 'selection' | 'tags' | 'chat' | 'annotation'
+type ActivityId = 'projects' | 'tags' | 'chat' | 'annotation'
 type DragState = { id: ActivityId; pointerId: number; origin: number; target: number; startY: number; deltaY: number; moved: boolean; settling?: boolean }
-const defaultOrder: ActivityId[] = ['projects', 'selection', 'tags', 'chat', 'annotation']
+const defaultOrder: ActivityId[] = ['projects', 'tags', 'chat', 'annotation']
 const orderStorageKey = 'reading-assistant-activity-order'
 const activityStep = 47
 
@@ -21,7 +21,7 @@ type Props = {
   hasSource: boolean
   dark: boolean
   annotationActive: boolean
-  labels: { selection: string; conversations: string; light: string; dark: string; settings: string }
+  labels: { conversations: string; light: string; dark: string; settings: string }
   onTogglePanel: (id: PanelId) => void
   onToggleAnnotation: () => void
   onToggleTheme: () => void
@@ -40,7 +40,7 @@ export default function ActivityBar({ openPanels, hasSource, dark, annotationAct
   const suppressClickRef = useRef(false)
 
   useEffect(() => {
-    onPanelOrderChange(order.filter((id): id is PanelId => ['projects', 'selection', 'tags', 'chat'].includes(id)))
+    onPanelOrderChange(order.flatMap((id): PanelId[] => id === 'annotation' ? [] : [id]))
   }, [order, onPanelOrderChange])
 
   useEffect(() => () => {
@@ -104,7 +104,6 @@ export default function ActivityBar({ openPanels, hasSource, dark, annotationAct
 
   const items: Record<ActivityId, React.ReactNode> = {
     projects: <button className={openPanels.projects ? 'active' : ''} onClick={() => onTogglePanel('projects')} title="文件"><FolderOpen /></button>,
-    selection: <button className={openPanels.selection ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('selection')} title={labels.selection}><MousePointer2 /></button>,
     tags: <button className={openPanels.tags ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('tags')} title="标签"><Tag /></button>,
     chat: <button className={openPanels.chat ? 'active' : ''} disabled={!hasSource} onClick={() => onTogglePanel('chat')} title={labels.conversations}><BrainCircuit /></button>,
     annotation: <button className={annotationActive ? 'active' : ''} disabled={!hasSource} onClick={onToggleAnnotation} title="批注"><Pen /></button>,

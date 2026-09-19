@@ -24,7 +24,33 @@ const textFileExtensions = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.t
 const packagedTestMarker = path.join(path.dirname(process.execPath), 'TEST_BUILD')
 const isDevelopmentInstance = process.argv.includes('--development-instance') || (app.isPackaged && fs.existsSync(packagedTestMarker))
 const applicationDirectory = app.isPackaged ? path.dirname(process.execPath) : path.resolve(dirname, '..')
-const raidDataPath = path.join(applicationDirectory, isDevelopmentInstance ? 'RaidData-test' : 'RaidData')
+const defaultUserDataPath = app.getPath('userData')
+const defaultSessionDataPath = app.getPath('sessionData')
+const raidDataDirectoryName = isDevelopmentInstance ? 'RaidData-test' : 'RaidData'
+const legacyRaidDataPath = path.join(applicationDirectory, raidDataDirectoryName)
+const preferredRaidDataPath = app.isPackaged
+  ? path.join(path.dirname(applicationDirectory), raidDataDirectoryName)
+  : legacyRaidDataPath
+const fallbackRaidDataPath = path.join(defaultUserDataPath, raidDataDirectoryName)
+
+function writableDataDirectory(preferred, fallback) {
+  for (const candidate of [preferred, fallback]) {
+    const probe = path.join(candidate, `.raid-write-probe-${process.pid}`)
+    try {
+      fs.mkdirSync(candidate, { recursive: true })
+      fs.writeFileSync(probe, '')
+      fs.rmSync(probe, { force: true })
+      return candidate
+    } catch {
+      try { fs.rmSync(probe, { force: true }) } catch { /* Ignore an inaccessible probe. */ }
+    }
+  }
+  return fallback
+}
+
+// Keep user data on the drive chosen for Raid, but outside $INSTDIR because the
+// NSIS upgrade process replaces that directory. C: is used only as a write fallback.
+const raidDataPath = writableDataDirectory(preferredRaidDataPath, fallbackRaidDataPath)
 const runtimeDataPath = path.join(raidDataPath, 'Runtime')
 const durableDataPath = path.join(raidDataPath, 'Data')
 const projectsDataPath = path.join(durableDataPath, 'projects')
@@ -35,15 +61,28 @@ const conversionCachePath = path.join(cacheDataPath, 'Conversion')
 const selectionCachePath = path.join(cacheDataPath, 'Selections')
 const dataManifestPath = path.join(raidDataPath, 'manifest.json')
 const storageSchemaVersion = 2
-const defaultUserDataPath = app.getPath('userData')
-const defaultSessionDataPath = app.getPath('sessionData')
 const chromiumDiskCacheLimit = 64 * 1024 * 1024
 const chromiumMediaCacheLimit = 16 * 1024 * 1024
+const usesSystemDriveFallback = path.resolve(raidDataPath) === path.resolve(fallbackRaidDataPath)
 
-// Keep a small, warm Chromium profile on the system drive for fast launches.
-// Durable reader data is stored separately in RaidData/Data beside the app.
+// Keep Chromium caches bounded. Durable reader data stays in the external
+// RaidData directory selected above.
 app.commandLine.appendSwitch('disk-cache-size', String(chromiumDiskCacheLimit))
 app.commandLine.appendSwitch('media-cache-size', String(chromiumMediaCacheLimit))
+
+function mergeLegacyData(source, removeAfterMerge = false) {
+  if (path.resolve(source) === path.resolve(raidDataPath) || !fs.existsSync(source)) return
+  try {
+    fs.cpSync(source, raidDataPath, { recursive: true, force: false, errorOnExist: false, preserveTimestamps: true })
+    if (removeAfterMerge) fs.rmSync(source, { recursive: true, force: true })
+  } catch { /* Keep the source as a recovery copy if migration is interrupted. */ }
+}
+
+fs.mkdirSync(raidDataPath, { recursive: true })
+mergeLegacyData(legacyRaidDataPath)
+for (const entry of fs.readdirSync(raidDataPath, { withFileTypes: true })) {
+  if (entry.isDirectory() && /^UpgradeBackup(?:-\d+)?$/i.test(entry.name)) mergeLegacyData(path.join(raidDataPath, entry.name), true)
+}
 
 function moveLegacyRuntimeEntry(name, destination = path.join(runtimeDataPath, name)) {
   const source = path.join(raidDataPath, name)
@@ -56,13 +95,34 @@ fs.mkdirSync(runtimeDataPath, { recursive: true })
 moveLegacyRuntimeEntry('Chromium', sessionDataPath)
 moveLegacyRuntimeEntry('Code Cache')
 for (const directory of [raidDataPath, runtimeDataPath, durableDataPath, projectsDataPath, cacheDataPath, sessionDataPath, crashDataPath, conversionCachePath, selectionCachePath]) fs.mkdirSync(directory, { recursive: true })
-if (isDevelopmentInstance) {
-  const testUserDataPath = `${defaultUserDataPath}-test`
-  const testSessionDataPath = `${defaultSessionDataPath}-test`
-  fs.mkdirSync(testUserDataPath, { recursive: true })
-  fs.mkdirSync(testSessionDataPath, { recursive: true })
-  app.setPath('userData', testUserDataPath)
-  app.setPath('sessionData', testSessionDataPath)
+
+function migrateChromiumProfiles(sources) {
+  const marker = path.join(sessionDataPath, '.system-profile-migrated-v1')
+  if (fs.existsSync(marker)) return
+  const regenerable = new Set(['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'Crashpad'])
+  try {
+    for (const source of sources) {
+      if (!fs.existsSync(source) || path.resolve(source) === path.resolve(sessionDataPath)) continue
+      fs.cpSync(source, sessionDataPath, {
+        recursive: true,
+        force: false,
+        errorOnExist: false,
+        filter: (entry) => {
+          const relative = path.relative(source, entry)
+          return !relative || !regenerable.has(relative.split(path.sep)[0])
+        },
+      })
+    }
+    fs.writeFileSync(marker, new Date().toISOString())
+  } catch { /* Retry next launch while leaving both profiles recoverable. */ }
+}
+
+if (!usesSystemDriveFallback) {
+  const legacyUserProfile = isDevelopmentInstance ? `${defaultUserDataPath}-test` : defaultUserDataPath
+  const legacySessionProfile = isDevelopmentInstance ? `${defaultSessionDataPath}-test` : defaultSessionDataPath
+  migrateChromiumProfiles([...new Set([legacyUserProfile, legacySessionProfile])])
+  app.setPath('userData', sessionDataPath)
+  app.setPath('sessionData', sessionDataPath)
 }
 app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
@@ -257,6 +317,32 @@ async function officeToPdf(inputPath, workingDirectory) {
   return fs.readFileSync(outputPath)
 }
 
+async function powerPointToPdf(inputPath, workingDirectory) {
+  if (process.platform !== 'win32') throw new Error('POWERPOINT_UNAVAILABLE')
+  const outputPath = path.join(workingDirectory, 'powerpoint.pdf')
+  const script = `$ErrorActionPreference = 'Stop'
+$powerpoint = $null
+$presentation = $null
+try {
+  $powerpoint = New-Object -ComObject PowerPoint.Application
+  $powerpoint.DisplayAlerts = 1
+  $presentation = $powerpoint.Presentations.Open($env:RAID_PPT_INPUT, -1, 0, 0)
+  $presentation.SaveAs($env:RAID_PPT_OUTPUT, 32)
+} finally {
+  if ($null -ne $presentation) { $presentation.Close(); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($presentation) }
+  if ($null -ne $powerpoint) { $powerpoint.Quit(); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($powerpoint) }
+}`
+  const encodedScript = Buffer.from(script, 'utf16le').toString('base64')
+  await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript], {
+    windowsHide: true,
+    timeout: 180000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: { ...process.env, RAID_PPT_INPUT: inputPath, RAID_PPT_OUTPUT: outputPath },
+  })
+  if (!fs.existsSync(outputPath)) throw new Error('DOCUMENT_CONVERSION_FAILED')
+  return fs.readFileSync(outputPath)
+}
+
 async function convertDocument(payload) {
   const safeName = path.basename(String(payload?.name || 'document'))
   const buffer = Buffer.from(payload?.data || [])
@@ -271,6 +357,15 @@ async function convertDocument(payload) {
     const text = convertibleTextExtensions.has(extension) || String(payload?.type || '').startsWith('text/') ? readableText(buffer) : null
     let pdfBuffer
     if (text !== null) pdfBuffer = await textToPdf(text, safeName, workingDirectory)
+    else if (extension === '.pptx') {
+      // Preserve the slide canvas, fonts, vectors, charts and object positions. The
+      // HTML parser is useful only as a last-resort readable fallback for slides.
+      try { pdfBuffer = await powerPointToPdf(inputPath, workingDirectory) }
+      catch {
+        try { pdfBuffer = await officeToPdf(inputPath, workingDirectory) }
+        catch { pdfBuffer = await parsedOfficeToPdf(buffer, extension, workingDirectory) }
+      }
+    }
     else if (officeParserExtensions.has(extension)) {
       try { pdfBuffer = await parsedOfficeToPdf(buffer, extension, workingDirectory) }
       catch { pdfBuffer = await officeToPdf(inputPath, workingDirectory) }
@@ -504,6 +599,9 @@ async function createWindow() {
   }
   mainWindow.once('ready-to-show', showMainWindow)
   mainWindow.webContents.once('dom-ready', () => logStartup('Reader DOM ready'))
+  // Hiding a native Windows menu still lets a lone Alt key reveal it. Raid does
+  // not use that menu, so remove it entirely while preserving renderer shortcuts.
+  mainWindow.setMenu(null)
   mainWindow.setMenuBarVisibility(false)
   mainWindow.on('closed', () => {
     for (const zoneWindow of dockZoneWindows.values()) if (!zoneWindow.isDestroyed()) zoneWindow.destroy()
