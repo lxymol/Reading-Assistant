@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatReference } from '../types'
+import { createStreamBatcher } from './streamBatcher.js'
 
 type AiStreamEvent = { type: 'delta'; delta: string } | { type: 'thread'; threadId: string } | { type: 'done'; content: string; references?: ChatReference[]; model?: string; skillName?: string; files?: Array<{ name: string; content: string }> } | { type: 'error'; error: string }
 type AiDoneEvent = Extract<AiStreamEvent, { type: 'done' }>
@@ -53,4 +54,28 @@ export const recentSelectionHistory = (messages: ChatMessage[]) => {
       content: message.role === 'user' && message.prompt && message.prompt !== message.content ? `${message.prompt}\n\n${message.content}` : message.content,
       attachmentIds: message.role === 'user' ? message.attachments?.map((image) => image.id) || [] : [],
     }))
+}
+
+export async function readConversationStream(response: Response, onEvent: (event: AiStreamEvent) => void) {
+  let callbackError: unknown
+  let result: AiDoneEvent
+  const batch = createStreamBatcher((delta) => {
+    try { onEvent({ type: 'delta', delta }) }
+    catch (error) { callbackError = error }
+  })
+  try {
+    result = await readAiStream(response, (event) => {
+      if (callbackError) throw callbackError
+      if (event.type === 'delta') batch.push(event.delta)
+      else {
+        batch.flush()
+        if (callbackError) throw callbackError
+        onEvent(event)
+      }
+    })
+  } finally {
+    batch.flush()
+  }
+  if (callbackError) throw callbackError
+  return result
 }

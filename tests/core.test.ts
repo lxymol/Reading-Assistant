@@ -10,7 +10,11 @@ import { analyzePageLayout } from '../src/services/layoutAnalyzer.ts'
 import { normalizeAssistantMath } from '../src/services/markdownMath.ts'
 import { boundSelectionPreviews } from '../src/services/selectionImageCache.ts'
 import { findShortcutAction, shortcutFromKeyboardEvent, shortcutFromMouseEvent } from '../src/services/shortcuts.ts'
-import { readAiStream, recentSelectionHistory } from '../src/services/aiResponse.ts'
+import { readAiStream, readConversationStream, recentSelectionHistory } from '../src/services/aiResponse.ts'
+import { ProjectWriter } from '../src/services/projectWriter.ts'
+import { createAutosaveScheduler } from '../src/services/autosaveScheduler.ts'
+import { createStreamBatcher } from '../src/services/streamBatcher.ts'
+import { coolProject, hydrateProject } from '../src/services/projectSession.ts'
 import { repairClippedWordStart } from '../src/services/textSelection.ts'
 import type { CapturedSelection, ChatMessage, DocumentParagraph, ReaderLocation, RuntimeProject } from '../src/types.ts'
 
@@ -250,4 +254,108 @@ test('AI streams cancel and unlock on terminal events and callback failures', as
   await assert.rejects(readAiStream(new Response(body), () => { throw new Error('UI unmounted') }), /UI unmounted/)
   assert.equal(canceled, true)
   assert.equal(body.locked, false)
+})
+
+
+test('desktop writer skips acknowledged immutable indexes and resends changed index state', async () => {
+  const writes: RuntimeProject[] = []
+  const writer = new ProjectWriter(async (value) => { writes.push(value); return true })
+  await writer.save(project)
+  await writer.save({ ...project, name: 'Renamed' })
+  assert.equal(writes[0].files[0].paragraphs.length, 2)
+  assert.equal(writes[1].files[0].indexLoaded, false)
+  assert.deepEqual(writes[1].files[0].paragraphs, [])
+  const changed = { ...project, files: project.files.map((file) => ({ ...file, indexState: { ...file.indexState, version: 2 } })) }
+  await writer.save(changed)
+  assert.equal(writes[2].files[0].paragraphs.length, 2)
+  await writer.remove(project.id, async () => {})
+  await writer.save(changed)
+  assert.equal(writes[3].files[0].paragraphs.length, 2, 'Deletion must invalidate acknowledged indexes')
+})
+
+test('desktop writer serializes concurrent saves, does not cache failures, and orders deletion', async () => {
+  let release!: () => void
+  const barrier = new Promise<void>((resolve) => { release = resolve })
+  const calls: string[] = []
+  const writer = new ProjectWriter(async (value) => {
+    calls.push(value.name + ':' + value.files[0].paragraphs.length)
+    if (calls.length === 1) { await barrier; throw new Error('Disk full') }
+    return true
+  })
+  const first = writer.save(project)
+  const rejected = assert.rejects(first, /Disk full/)
+  const second = writer.save({ ...project, name: 'Second' })
+  const deleted = writer.remove(project.id, async () => { calls.push('deleted') })
+  await Promise.resolve()
+  assert.deepEqual(calls, ['Research:2'])
+  release()
+  await Promise.all([rejected, second, deleted])
+  await writer.flush()
+  assert.deepEqual(calls, ['Research:2', 'Second:2', 'deleted'])
+})
+
+test('autosave checkpoints continuous updates, flushes project changes and cancels stale snapshots', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const writes: string[] = []
+  const errors: unknown[] = []
+  const scheduler = createAutosaveScheduler<string>(async (value) => { writes.push(value) }, (error) => errors.push(error), 10, 30)
+  scheduler.schedule('a', () => 'first')
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(5)
+    scheduler.schedule('a', () => `latest-${i}`)
+  }
+  t.mock.timers.tick(5)
+  assert.deepEqual(writes, ['latest-4'], 'Continuous input must not postpone every save')
+  scheduler.schedule('a', () => 'before-switch')
+  scheduler.schedule('b', () => 'new-project')
+  assert.deepEqual(writes, ['latest-4', 'before-switch'])
+  scheduler.cancel('b')
+  t.mock.timers.tick(100)
+  assert.equal(writes.length, 2, 'An explicit save/delete must cancel the older autosave')
+  scheduler.schedule('b', () => { throw new Error('snapshot failed') })
+  await scheduler.flush()
+  assert.equal(errors.length, 1)
+  assert.match(String(errors[0]), /snapshot failed/)
+})
+
+test('stream batcher bounds update rate, flushes text in order and cancels trailing work', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const updates: string[] = []
+  const batch = createStreamBatcher((text) => updates.push(text), 40)
+  for (let index = 0; index < 1000; index++) batch.push('字')
+  assert.equal(updates.length, 0)
+  t.mock.timers.tick(40)
+  assert.deepEqual(updates, ['字'.repeat(1000)])
+  batch.push('tail')
+  batch.flush()
+  batch.push('discard')
+  batch.cancel()
+  t.mock.timers.tick(100)
+  assert.deepEqual(updates, ['字'.repeat(1000), 'tail'])
+})
+
+test('batched conversation preserves partial output before stream failure and the terminal answer', async () => {
+  const chunks: string[] = []
+  await assert.rejects(readConversationStream(new Response('{"type":"delta","delta":"partial"}\n{"type":"error","error":"failed"}\n'), (event) => {
+    if (event.type === 'delta') chunks.push(event.delta)
+  }), /failed/)
+  assert.deepEqual(chunks, ['partial'])
+  const events: string[] = []
+  await readConversationStream(new Response('{"type":"delta","delta":"a"}\n{"type":"delta","delta":"b"}\n{"type":"done","content":"ab"}\n'), (event) => events.push(event.type))
+  assert.deepEqual(events, ['delta', 'done'])
+})
+
+test('project session reloads cooled histories and indexes without replacing unsaved metadata', async () => {
+  const stored = { ...project, conversations: [{ id: 'chat', title: 'Saved', history: [{ id: 'message', role: 'assistant' as const, content: 'Answer' }] }] }
+  const reader = { get: async () => stored, getSource: async () => null }
+  const cooled = coolProject(stored)
+  assert.equal(cooled.files[0].paragraphs.length, 0)
+  assert.equal(cooled.conversations[0].historyLoaded, false)
+  const hydrated = await hydrateProject(cooled, 'left', reader, 'Missing')
+  assert.deepEqual(hydrated.conversations[0].history, stored.conversations[0].history)
+  const edited = { ...hydrated, name: 'Unsaved name', files: hydrated.files.map((file) => ({ ...file, indexLoaded: false })) }
+  const restored = await hydrateProject(edited, 'left', reader, 'Missing')
+  assert.equal(restored.name, 'Unsaved name')
+  assert.equal(restored.files[0].paragraphs.length, 2)
+  assert.equal(restored.files[1].paragraphs.length, 0)
 })

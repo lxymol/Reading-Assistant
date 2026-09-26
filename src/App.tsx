@@ -5,7 +5,7 @@ import {
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
   Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, Undo2, X, Square, Tag,
 } from 'lucide-react'
-import { readAiStream, recentSelectionHistory } from './services/aiResponse'
+import { readAiStream, readConversationStream, recentSelectionHistory } from './services/aiResponse'
 import ActivityBar from './components/ActivityBar'
 import ProjectExplorer from './components/ProjectExplorer'
 import TagPanel from './components/TagPanel'
@@ -16,6 +16,8 @@ import { getLanguagePacks, registerLanguagePack, useI18n, type AppLanguage, type
 import { parseLanguageImport, parseSkillImport } from './lib/imports'
 import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, loadShortcutSettings, loadSkills, loadUserMemory } from './lib/preferences'
 import { projectRepository } from './services/projectRepository'
+import { useProjectAutosave } from './hooks/useProjectAutosave'
+import { coolProject, hydrateProject as hydrateStoredProject, buildBrowserDocumentContext as readBrowserDocumentContext } from './services/projectSession'
 import { retrievalService } from './services/retrievalService'
 import { createCitationContext, createReferences, validateReference } from './services/citationService'
 import { boundSelectionPreviews, deleteStoredSelectionImages, disposeSelectionImages, resolveSelectionImage, retainSelectionImages } from './services/selectionImageCache'
@@ -45,12 +47,6 @@ const generatedTextParagraphs = (content: string, projectId: string, fileId: str
     text, textHash: stableTextHash(text), order,
   }))
 }
-const coolProject = (project: RuntimeProject): RuntimeProject => ({
-  ...project,
-  hydrated: false,
-  files: project.files.map((file) => ({ ...file, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false, indexLoaded: false })),
-  conversations: project.conversations.map((conversation) => ({ ...conversation, history: [], historyLoaded: false })),
-})
 const nextPanelZ = (items: Record<PanelId, PanelLayout>) => Math.max(40, ...Object.values(items).map((item) => item.z)) + 1
 const normalizePanelZ = (items: Record<PanelId, PanelLayout>) => Object.fromEntries(
   (Object.entries(items) as [PanelId, PanelLayout][])
@@ -443,14 +439,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
   }, [activeProjectId, projects, conversations, activeConversationId, history, activeFileId, currentPage, zoom, highlights, annotations])
 
-  useEffect(() => {
-    if (!activeProjectId) return
-    const timer = window.setTimeout(() => {
-      const snapshot = snapshotCurrent()
-      if (snapshot) void projectRepository.save(snapshot).catch(() => undefined)
-    }, 700)
-    return () => window.clearTimeout(timer)
-  }, [activeProjectId, snapshotCurrent])
+  useProjectAutosave(activeProjectId, snapshotCurrent, setError)
 
   const loadProjectFile = (project: RuntimeProject, file: RuntimeProjectFile | null) => {
     if (fitWidthPendingRef.current && fitWidthPendingRef.current !== file?.id) fitWidthPendingRef.current = null
@@ -475,26 +464,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     pendingPageRestoreRef.current = file?.readingState.page || 1
   }
 
-  const hydrateProject = async (project: RuntimeProject, indexFileId: string | null = null) => {
-    const hasRequestedIndexes = indexFileId
-      ? project.files.find((file) => file.id === indexFileId)?.indexLoaded !== false
-      : project.files.every((file) => file.indexLoaded !== false)
-    if (project.hydrated && hasRequestedIndexes) return project
-    const stored = await projectRepository.get(project.id, false, indexFileId)
-    if (!stored) throw new Error(pack.code === 'en-US' ? 'The combination is missing.' : '组合数据缺失。')
-    const withoutLegacyNotes = { ...stored } as typeof stored & { projectNotes?: string; projectNoteAssets?: Record<string, string> }
-    delete withoutLegacyNotes.projectNotes
-    delete withoutLegacyNotes.projectNoteAssets
-    const currentFiles = new Map(project.files.map((file) => [file.id, file]))
-    const files = stored.files.map((file) => {
-      const current = currentFiles.get(file.id)
-      if (!current || !project.hydrated) return { ...file, sourceLoaded: false } as RuntimeProjectFile
-      const loaded = (file as RuntimeProjectFile).indexLoaded !== false
-      if (indexFileId && file.id !== indexFileId) return { ...file, ...current, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false, indexLoaded: false }
-      return { ...file, ...current, paragraphs: loaded ? file.paragraphs : current.paragraphs, indexState: loaded ? file.indexState : current.indexState, indexLoaded: loaded || current.indexLoaded !== false }
-    })
-    return { ...withoutLegacyNotes, ...(project.hydrated ? project : {}), isLoose: stored.id === looseFilesId || stored.isLoose, files, hydrated: true } as RuntimeProject
-  }
+  const hydrateProject = (project: RuntimeProject, indexFileId: string | null = null) =>
+    hydrateStoredProject(project, indexFileId, projectRepository, pack.code === 'en-US' ? 'The combination is missing.' : '组合数据缺失。')
 
   const hydrateProjectFile = async (project: RuntimeProject, fileId: string) => {
     const file = project.files.find((item) => item.id === fileId)
@@ -1056,23 +1027,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return { ...(await buildBrowserDocumentContext(project, fileId)), references }
   }
 
-  const buildBrowserDocumentContext = async (project: RuntimeProject, fileId?: string) => {
-    const blocks: string[] = []
-    let characters = 0
-    for (const file of project.files.filter((item) => !fileId || item.id === fileId)) {
-      const stored = await projectRepository.get(project.id, false, file.id)
-      const loaded = stored?.files.find((item) => item.id === file.id)
-      const blob = file.kind === 'text' ? await projectRepository.getSource(project.id, file.id, file.type) : null
-      if (blob && blob.size > 1200000) throw new Error('全文超过 API 单次附件预算，请使用 Codex 账户模式或拆分文档；未截断文档内容。')
-      const text = blob ? await blob.text() : (loaded?.paragraphs || []).map((paragraph) => `[Page ${paragraph.page}]\n${paragraph.text}`).join('\n\n')
-      if (!text.trim()) throw new Error(`文档没有可读文字，需要先提取文字或进行 OCR：${file.name}`)
-      const block = `File: ${file.name}\n${text}`
-      characters += block.length
-      if (characters > 300000) throw new Error('全文超过 API 单次附件预算，请使用 Codex 账户模式或拆分文档；未截断文档内容。')
-      blocks.push(block)
-    }
-    return { context: blocks.join('\n\n'), references: [] }
-  }
+  const buildBrowserDocumentContext = (project: RuntimeProject, fileId?: string) =>
+    readBrowserDocumentContext(project, projectRepository, fileId)
 
   const updateConversationRoute = (workspaceId: string, conversationId: string, update: (conversation: Conversation) => Conversation) => {
     if (activeProjectIdRef.current === workspaceId) {
@@ -1322,7 +1278,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
         }),
       })
       let streamedContent = ''
-      const done = await readAiStream(response, (event) => {
+      const done = await readConversationStream(response, (event) => {
         if (event.type === 'thread') updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, codexThreadId: event.threadId, codexThreadVersion: 2 }))
         if (event.type === 'delta') {
           streamedContent += event.delta

@@ -1,6 +1,7 @@
 import type { Project, ProjectSummary, RuntimeProject, RuntimeProjectFile } from '../types'
 import { retrievalService } from './retrievalService'
 import { createIndexedDatabase } from './indexedDatabase.js'
+import { ProjectWriter } from './projectWriter.js'
 
 const databaseName = 'raid-projects-v2'
 const projectStore = 'projects'
@@ -25,8 +26,19 @@ const idbRequest = database.request
 const sourceKey = (projectId: string, fileId: string) => `${projectId}:${fileId}`
 
 export class ProjectRepository {
+  private desktopWriter = new ProjectWriter((project) => window.readingAssistant!.saveProject(project))
+  private writeListeners = new Set<(projectId: string) => void>()
+
+  onWrite(listener: (projectId: string) => void) {
+    this.writeListeners.add(listener)
+    return () => { this.writeListeners.delete(listener) }
+  }
+
   async list(): Promise<ProjectSummary[]> {
-    if (window.readingAssistant) return window.readingAssistant.listProjects()
+    if (window.readingAssistant) {
+      await this.desktopWriter.flush()
+      return window.readingAssistant.listProjects()
+    }
     return database.transaction<ProjectSummary[]>(projectStore, 'readonly', (transaction, result) => {
       const summaries: ProjectSummary[] = []
       const cursor = transaction.objectStore(projectStore).openCursor()
@@ -40,14 +52,20 @@ export class ProjectRepository {
   }
 
   async get(id: string, lightweight = false, indexFileId: string | null = null): Promise<Project | null> {
-    if (window.readingAssistant) return window.readingAssistant.getProject(id, lightweight, indexFileId)
+    if (window.readingAssistant) {
+      await this.desktopWriter.flush(id)
+      return window.readingAssistant.getProject(id, lightweight, indexFileId)
+    }
     const project = await idbRequest<Project | undefined>(projectStore, 'readonly', (store) => store.get(id))
     if (!project) return null
     return { ...project, files: project.files.map((file) => ({ ...file, paragraphs: !lightweight && (!indexFileId || file.id === indexFileId) ? file.paragraphs : [], indexLoaded: !lightweight && (!indexFileId || file.id === indexFileId) })), ...(lightweight ? { conversations: project.conversations.map((conversation) => ({ ...conversation, history: [], historyLoaded: false })) } : {}) }
   }
 
   async retrieveContext(id: string, query: string, options: { maxCharacters?: number; maxHits?: number }) {
-    if (window.readingAssistant?.retrieveProjectContext) return window.readingAssistant.retrieveProjectContext(id, query, options)
+    if (window.readingAssistant?.retrieveProjectContext) {
+      await this.desktopWriter.flush(id)
+      return window.readingAssistant.retrieveProjectContext(id, query, options)
+    }
     const project = await this.get(id)
     if (!project) return { context: '', hitCount: 0 }
     const result = retrievalService.retrieve({ ...project, files: project.files as RuntimeProjectFile[] }, query, { ...options, strategy: 'project' })
@@ -55,8 +73,9 @@ export class ProjectRepository {
   }
 
   async save(project: RuntimeProject | Project) {
+    for (const listener of this.writeListeners) listener(project.id)
     const value = persistedProject(project)
-    if (window.readingAssistant) return window.readingAssistant.saveProject(value)
+    if (window.readingAssistant) return this.desktopWriter.save(value)
     await database.transaction<void>(projectStore, 'readwrite', (transaction) => {
       const store = transaction.objectStore(projectStore)
       const request = store.get(value.id)
@@ -91,7 +110,8 @@ export class ProjectRepository {
   }
 
   async deleteProject(id: string) {
-    if (window.readingAssistant) return window.readingAssistant.deleteProject(id)
+    for (const listener of this.writeListeners) listener(id)
+    if (window.readingAssistant) return this.desktopWriter.remove(id, () => window.readingAssistant!.deleteProject(id))
     await database.transaction<void>([projectStore, sourceStore], 'readwrite', (transaction) => {
       transaction.objectStore(projectStore).delete(id)
       // Include orphaned sources left behind by an interrupted import.
@@ -106,7 +126,8 @@ export class ProjectRepository {
   }
 
   async deleteFile(projectId: string, fileId: string) {
-    if (window.readingAssistant) return window.readingAssistant.deleteProjectFile(projectId, fileId)
+    for (const listener of this.writeListeners) listener(projectId)
+    if (window.readingAssistant) return this.desktopWriter.remove(projectId, () => window.readingAssistant!.deleteProjectFile(projectId, fileId))
     await idbRequest<undefined>(sourceStore, 'readwrite', (store) => store.delete(sourceKey(projectId, fileId)))
   }
 }
