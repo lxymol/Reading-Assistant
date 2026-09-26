@@ -62,19 +62,22 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
     popup.document.body.replaceChildren(root)
     setPortalTarget(root)
     popup.focus()
+    const readyForGeometryAt = performance.now() + 350
 
     const syncLayout = () => {
-      if (moveRef.current?.mode === 'float') return
+      if (popup.closed || popupRef.current !== popup || performance.now() < readyForGeometryAt || moveRef.current?.mode === 'float') return
       const latest = layoutRef.current
-      const width = popup.outerWidth
-      const height = popup.outerHeight
+      const width = popup.innerWidth
+      const height = popup.innerHeight
       const x = popup.screenX
       const y = popup.screenY
       if (width !== latest.width || height !== latest.height || x !== latest.x || y !== latest.y) {
         onChangeRef.current({ ...latest, width, height, x, y })
       }
     }
-    const handleClose = () => onChangeRef.current({ ...layoutRef.current, open: false })
+    const handleClose = () => {
+      if (popupRef.current === popup && layoutRef.current.open && layoutRef.current.dock === 'float') onChangeRef.current({ ...layoutRef.current, open: false })
+    }
     const forwardKeyDown = (event: KeyboardEvent) => {
       const forwarded = new KeyboardEvent('keydown', {
         key: event.key, code: event.code, ctrlKey: event.ctrlKey, altKey: event.altKey,

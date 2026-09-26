@@ -6,7 +6,6 @@ import {
   Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, Undo2, X, Square, Tag,
 } from 'lucide-react'
 import { readAiStream, recentSelectionHistory } from './services/aiResponse'
-import ConversationMessages from './components/ConversationMessages'
 import ActivityBar from './components/ActivityBar'
 import ProjectExplorer from './components/ProjectExplorer'
 import TagPanel from './components/TagPanel'
@@ -19,25 +18,38 @@ import { loadAiConfig, loadDarkTheme, loadMemorySettings, loadPanelLayouts, load
 import { projectRepository } from './services/projectRepository'
 import { retrievalService } from './services/retrievalService'
 import { createCitationContext, createReferences, validateReference } from './services/citationService'
-import { boundSelectionPreviews, disposeSelectionImages, resolveSelectionImage } from './services/selectionImageCache'
+import { boundSelectionPreviews, deleteStoredSelectionImages, disposeSelectionImages, resolveSelectionImage, retainSelectionImages } from './services/selectionImageCache'
 import { NavigationService } from './services/navigationService'
 import { ReaderController } from './services/readerController'
 import { createTag, tagsWithoutFile } from './services/tagStore'
 import { findShortcutAction, shortcutFromKeyboardEvent, shortcutFromMouseEvent } from './services/shortcuts'
+import { stableTextHash } from './services/layoutAnalyzer'
 
 const DocumentViewer = lazy(() => import('./components/DocumentViewer'))
+const ConversationMessages = lazy(() => import('./components/ConversationMessages'))
 const AiSettingsModal = lazy(() => import('./components/AiSettingsModal'))
 const aiActions = [['translate', Languages], ['explain', MessageSquareText], ['insight', Lightbulb], ['summarize', FileText]] as const
 const documentIndexVersion = 1
 const looseFilesId = 'raid-loose-files'
+const maximumVisionImages = 8
+const maximumVisionBytes = 12 * 1024 * 1024
 
 
 const makeId = () => crypto.randomUUID()
+const currentTimestamp = () => Date.now()
+const generatedTextParagraphs = (content: string, projectId: string, fileId: string): DocumentParagraph[] => {
+  const chunks = content.match(/[\s\S]{1,1600}/g) || []
+  return chunks.map((text, order) => ({
+    id: `${fileId}:p1:${order}:${stableTextHash(text)}`, projectId, fileId, page: 1,
+    region: { left: 0, top: order / Math.max(1, chunks.length), width: 1, height: 1 / Math.max(1, chunks.length) },
+    text, textHash: stableTextHash(text), order,
+  }))
+}
 const coolProject = (project: RuntimeProject): RuntimeProject => ({
   ...project,
   hydrated: false,
   files: project.files.map((file) => ({ ...file, paragraphs: [], source: undefined, pdf: null, sourceLoaded: false, indexLoaded: false })),
-  conversations: project.conversations.map((conversation) => ({ ...conversation, history: [] })),
+  conversations: project.conversations.map((conversation) => ({ ...conversation, history: [], historyLoaded: false })),
 })
 const nextPanelZ = (items: Record<PanelId, PanelLayout>) => Math.max(40, ...Object.values(items).map((item) => item.z)) + 1
 const normalizePanelZ = (items: Record<PanelId, PanelLayout>) => Object.fromEntries(
@@ -113,12 +125,9 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const [panelOrder, setPanelOrder] = useState<PanelId[]>(['projects', 'tags', 'chat'])
   const [activitySide, setActivitySide] = useState<'left' | 'right'>(() => localStorage.getItem('reading-assistant-activity-side') === 'right' ? 'right' : 'left')
   const [aiFontSize, setAiFontSize] = useState(() => Math.max(10, Math.min(26, Number(localStorage.getItem('reading-assistant-ai-font-size')) || 12)))
-  const [quickOpenEnabled, setQuickOpenEnabled] = useState(false)
   const [createCombinationSignal, setCreateCombinationSignal] = useState(0)
   const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings>(loadShortcutSettings)
-  const [selectionContextEnabled, setSelectionContextEnabled] = useState(() => localStorage.getItem('reading-assistant-selection-context') === 'true')
   const abortControllersRef = useRef(new Map<string, AbortController>())
-  const [aiTaskContexts, setAiTaskContexts] = useState<Map<string, { scope: 'selection' | 'document' | 'combination'; selectionContext: boolean }>>(() => new Map())
   const projectsRef = useRef(projects)
   const currentPageRef = useRef(currentPage)
   const visionAvailable = aiConfig.provider === 'codex' || (aiConfig.visionEnabled && Boolean(aiConfig.visionModel.trim()))
@@ -136,6 +145,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const chatWasStreamingRef = useRef(false)
   const chatPinnedScrollTopRef = useRef(0)
   const chatLastScrollTopRef = useRef(0)
+  const chatSavedScrollTopRef = useRef(0)
+  const chatRestorePendingRef = useRef(false)
   const readerScrollRef = useRef<HTMLDivElement>(null)
   const scrollFrameRef = useRef<number | null>(null)
   const zoomPageLockRef = useRef<{ page: number; until: number } | null>(null)
@@ -156,6 +167,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const activeConversationIdRef = useRef(activeConversationId)
   const selectionsRef = useRef<CapturedSelection[]>([])
   const pendingPageRestoreRef = useRef<number | null>(null)
+  const fitWidthPendingRef = useRef<string | null>(null)
   const userMemoryRef = useRef(userMemory)
   const memorySettingsRef = useRef(memorySettings)
   const memoryUpdateQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -322,18 +334,11 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const openSettings = () => {
     setSettingsOpen(true)
-    void window.readingAssistant?.getQuickOpenEnabled().then(setQuickOpenEnabled).catch(() => setQuickOpenEnabled(false))
   }
 
   useEffect(() => {
     fetch('/api/health').then((r) => r.json()).then((data) => setConfigured(data.configured)).catch(() => setConfigured(false))
   }, [])
-
-  useEffect(() => {
-    // Start and authenticate the local Codex bridge while the reader is idle so
-    // the first inline translation does not pay its process startup cost.
-    if (aiConfig.provider === 'codex') void fetch('/api/codex/status').catch(() => undefined)
-  }, [aiConfig.provider])
 
   useEffect(() => {
     let active = true
@@ -366,6 +371,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const wasStreaming = chatWasStreamingRef.current
     chatWasStreamingRef.current = currentAiBusy
     if (!container) return
+    if (chatRestorePendingRef.current) {
+      container.scrollTop = Math.min(chatSavedScrollTopRef.current, Math.max(0, container.scrollHeight - container.clientHeight))
+      chatLastScrollTopRef.current = container.scrollTop
+      chatRestorePendingRef.current = false
+      return
+    }
     if (chatFollowSuspendedRef.current && (currentAiBusy || wasStreaming)) {
       container.scrollTop = Math.min(chatPinnedScrollTopRef.current, Math.max(0, container.scrollHeight - container.clientHeight))
       chatLastScrollTopRef.current = container.scrollTop
@@ -379,16 +390,15 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   useEffect(() => {
     if (!panelLayouts.chat.open) return
-    chatFollowSuspendedRef.current = false
-    chatAutoFollowRef.current = true
     window.requestAnimationFrame(() => {
       const container = panelScrollRef.current
-      if (container) {
-        container.scrollTop = container.scrollHeight
+      if (container && chatRestorePendingRef.current) {
+        container.scrollTop = Math.min(chatSavedScrollTopRef.current, Math.max(0, container.scrollHeight - container.clientHeight))
         chatLastScrollTopRef.current = container.scrollTop
+        chatRestorePendingRef.current = false
       }
     })
-  }, [promptHeight, leftDockWidth, rightDockWidth, panelLayouts.chat.open, panelLayouts.chat.dock, panelLayouts.chat.height, panelLayouts.chat.dockSize])
+  }, [panelLayouts.chat.open])
 
   const stopFollowingOnUpwardWheel = (container: HTMLDivElement, deltaY: number, deltaMode: number) => {
     if (deltaY >= 0) return
@@ -400,6 +410,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const trackChatPosition = (container: HTMLDivElement) => {
     const top = container.scrollTop
+    chatSavedScrollTopRef.current = top
     const movedUp = top < chatLastScrollTopRef.current - .5
     chatLastScrollTopRef.current = top
     if (chatWasStreamingRef.current && movedUp) {
@@ -442,6 +453,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   }, [activeProjectId, snapshotCurrent])
 
   const loadProjectFile = (project: RuntimeProject, file: RuntimeProjectFile | null) => {
+    if (fitWidthPendingRef.current && fitWidthPendingRef.current !== file?.id) fitWidthPendingRef.current = null
     if (source?.url && source.url !== file?.source?.url && source.url.startsWith('blob:')) URL.revokeObjectURL(source.url)
     setActiveProjectId(project.id); activeProjectIdRef.current = project.id
     setActiveFileId(file?.id || null); activeFileIdRef.current = file?.id || null
@@ -554,6 +566,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
 
     let fileToOpen: RuntimeProjectFile | null = null
+    let newFileToOpenId: string | null = null
     for (const file of incomingFiles) {
       let readableFile = file
       const lowerName = file.name.toLocaleLowerCase()
@@ -582,7 +595,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       }
 
       const duplicate = project.files.find((item) => item.name === readableFile.name && item.size === readableFile.size && item.lastModified === readableFile.lastModified)
-      if (duplicate) { fileToOpen = duplicate; continue }
+      if (duplicate) { fileToOpen = duplicate; newFileToOpenId = null; continue }
       const now = Date.now()
       const fileId = makeId()
       const fileKind = readableFile.type === 'application/pdf' || readableFile.name.toLocaleLowerCase().endsWith('.pdf') ? 'pdf' : 'image'
@@ -596,6 +609,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       project = { ...project, files: [...project.files, projectFile], activeConversationId: '', activeFileId: fileId, updatedAt: now, hydrated: true }
       await projectRepository.saveSource(project.id, fileId, readableFile)
       fileToOpen = projectFile
+      newFileToOpenId = fileId
     }
     if (!fileToOpen) return
 
@@ -606,6 +620,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       fileToOpen = hydrated.file
     }
     const openFileId = fileToOpen.id
+    fitWidthPendingRef.current = newFileToOpenId
     for (const item of project.files) {
       if (item.id !== openFileId && item.source?.url.startsWith('blob:')) URL.revokeObjectURL(item.source.url)
     }
@@ -676,7 +691,23 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setError('')
   }
 
-  const deleteConversation = (id: string) => {
+  const forgetConversationAssets = async (conversation: Conversation) => {
+    if (conversation.codexThreadId) {
+      const response = await fetch('/api/ai/thread/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threadId: conversation.codexThreadId }),
+      })
+      if (!response.ok) throw new Error('无法删除 Codex 对话记录，请重试')
+    }
+    const imageIds = conversation.history.flatMap((message) => (message.attachments || []).map((image) => image.id))
+    if (imageIds.length) await deleteStoredSelectionImages(imageIds)
+  }
+
+  const deleteConversation = async (id: string) => {
+    const removed = syncCurrentConversation().find((item) => item.id === id)
+    abortControllersRef.current.get(`${activeProjectId}:${id}`)?.abort()
+    try { if (removed) await forgetConversationAssets(removed) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : '无法删除选区图片'); return }
     const synced = syncCurrentConversation().filter((item) => item.id !== id)
     if (id !== activeConversationId) { setConversations(synced); return }
     const next = synced.at(-1)
@@ -751,8 +782,40 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     setPdf(document)
     const projectId = activeProjectIdRef.current
     const fileId = activeFileIdRef.current
+    if (fileId && fitWidthPendingRef.current === fileId) {
+      fitWidthPendingRef.current = null
+      void document.getPage(1).then((page) => {
+        try {
+          if (activeFileIdRef.current !== fileId) return
+          const container = readerScrollRef.current
+          if (!container) return
+          const style = getComputedStyle(container)
+          const availableWidth = container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 12
+          const width = page.getViewport({ scale: .82 }).width
+          if (availableWidth > 0 && width > 0) setZoom(Math.max(.25, Math.min(5, availableWidth / width)))
+        } finally { page.cleanup() }
+      }).catch(() => undefined)
+    }
     if (projectId && fileId) setProjects((items) => items.map((project) => project.id === projectId ? { ...project, files: project.files.map((file) => file.id === fileId ? { ...file, pdf: document } : file) } : project))
   }, [])
+
+  useEffect(() => {
+    if (source?.kind !== 'image' || !activeFileId || fitWidthPendingRef.current !== activeFileId) return
+    const fileId = activeFileId
+    const image = new Image()
+    image.src = source.url
+    void image.decode().then(() => {
+      if (activeFileIdRef.current !== fileId || fitWidthPendingRef.current !== fileId) return
+      const container = readerScrollRef.current
+      if (!container) return
+      const style = getComputedStyle(container)
+      const availableWidth = container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 12
+      const width = Math.min(1100, image.naturalWidth)
+      if (availableWidth > 0 && width > 0) setZoom(Math.max(.25, Math.min(5, availableWidth / width)))
+      fitWidthPendingRef.current = null
+    }).catch(() => undefined).finally(() => { image.src = '' })
+    return () => { image.src = '' }
+  }, [source, activeFileId])
 
   useEffect(() => {
     if (source?.kind !== 'pdf' || !pdf || pendingPageRestoreRef.current === null) return
@@ -927,7 +990,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [source, pdf, activeProjectId, activeFileId])
 
-  const buildProjectContext = async (workspaceId: string, query: string, fileId?: string) => {
+  const buildProjectContext = async (workspaceId: string, query: string, fileId?: string): Promise<{ context: string; references: ReturnType<typeof createReferences>; documentSource?: { projectId: string; fileIds: string[] } }> => {
     const snapshot = snapshotCurrent()
     let project = snapshot?.id === workspaceId ? snapshot : projectsRef.current.find((item) => item.id === workspaceId)
     if (!project) return { context: '', references: [] }
@@ -963,8 +1026,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       projectsRef.current = projectsRef.current.map((item) => item.id === project!.id ? project! : item)
       setProjects(projectsRef.current)
       if (project.hydrated) await projectRepository.save(project)
-      const result = await projectRepository.retrieveContext(workspaceId, query, { maxHits: 64, maxCharacters: 80000 })
-      return { context: result.context, references: [] }
+      if (window.readingAssistant) return { context: '', references: [], documentSource: { projectId: workspaceId, fileIds: project.files.map((file) => file.id) } }
+      return buildBrowserDocumentContext(project)
     }
     project = await hydrateProject(project, fileId)
     const targetFiles = fileId ? project.files.filter((file) => file.id === fileId) : project.files
@@ -973,7 +1036,8 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     // Build its index here instead of sending an empty-context request.
     if (!targetFiles.some((file) => file.paragraphs.length) && pdf && activeFileId && targetFiles.some((file) => file.id === activeFileId)) {
       const { documentIndexer } = await import('./services/documentIndexer')
-      const { paragraphs, state } = await documentIndexer.indexPdf(pdf, project.id, activeFileId, undefined, { priorityPage: currentPageRef.current })
+      const runningIndex = await indexTasksRef.current.get(`${project.id}:${activeFileId}`)?.catch(() => undefined)
+      const { paragraphs, state } = runningIndex || await documentIndexer.indexPdf(pdf, project.id, activeFileId, undefined, { priorityPage: currentPageRef.current })
       const indexedAt = state.indexedAt || project.updatedAt
       project = {
         ...project,
@@ -987,7 +1051,27 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const strategy = fileId ? 'document' : 'project'
     const result = retrievalService.retrieve(project, query, { strategy, fileId, maxHits: fileId ? 56 : 64, maxCharacters: fileId ? 65000 : 80000 })
     const references = createReferences(project, result.hits, 64)
-    return { context: `${result.overview}\n\n【按任务提取的正文证据】\n${createCitationContext(references)}`, references }
+    await projectRepository.save(project)
+    if (window.readingAssistant) return { context: createCitationContext(references), references, documentSource: { projectId: workspaceId, fileIds: fileId ? [fileId] : project.files.map((file) => file.id) } }
+    return { ...(await buildBrowserDocumentContext(project, fileId)), references }
+  }
+
+  const buildBrowserDocumentContext = async (project: RuntimeProject, fileId?: string) => {
+    const blocks: string[] = []
+    let characters = 0
+    for (const file of project.files.filter((item) => !fileId || item.id === fileId)) {
+      const stored = await projectRepository.get(project.id, false, file.id)
+      const loaded = stored?.files.find((item) => item.id === file.id)
+      const blob = file.kind === 'text' ? await projectRepository.getSource(project.id, file.id, file.type) : null
+      if (blob && blob.size > 1200000) throw new Error('全文超过 API 单次附件预算，请使用 Codex 账户模式或拆分文档；未截断文档内容。')
+      const text = blob ? await blob.text() : (loaded?.paragraphs || []).map((paragraph) => `[Page ${paragraph.page}]\n${paragraph.text}`).join('\n\n')
+      if (!text.trim()) throw new Error(`文档没有可读文字，需要先提取文字或进行 OCR：${file.name}`)
+      const block = `File: ${file.name}\n${text}`
+      characters += block.length
+      if (characters > 300000) throw new Error('全文超过 API 单次附件预算，请使用 Codex 账户模式或拆分文档；未截断文档内容。')
+      blocks.push(block)
+    }
+    return { context: blocks.join('\n\n'), references: [] }
   }
 
   const updateConversationRoute = (workspaceId: string, conversationId: string, update: (conversation: Conversation) => Conversation) => {
@@ -1071,6 +1155,40 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }).catch(() => undefined)
   }
 
+  const addGeneratedTextFiles = async (projectId: string, outputs: Array<{ name: string; content: string }>) => {
+    const created: RuntimeProjectFile[] = []
+    for (const output of outputs.slice(0, 12)) {
+      const content = String(output.content || '').slice(0, 1024 * 1024)
+      if (!content.trim()) continue
+      const rawName = String(output.name || '生成内容.md').replace(/[\\/:*?"<>|]/g, '_').slice(0, 100)
+      const name = /\.[a-z0-9]{1,10}$/i.test(rawName) ? rawName : `${rawName}.txt`
+      const file = new File([content], name, { type: 'text/plain', lastModified: currentTimestamp() })
+      const id = makeId()
+      const now = currentTimestamp()
+      const entry: RuntimeProjectFile = {
+        id, projectId, name, kind: 'text', type: 'text/plain', size: file.size, lastModified: file.lastModified,
+        createdAt: now, updatedAt: now, readingState: { page: 1, zoom: 1, scrollTop: 0 },
+        highlights: [], annotations: [], paragraphs: generatedTextParagraphs(content, projectId, id),
+        indexState: { status: 'ready', version: documentIndexVersion, indexedAt: now }, indexLoaded: true,
+      }
+      await projectRepository.saveSource(projectId, id, file)
+      created.push(entry)
+    }
+    if (!created.length) return
+    const current = projectsRef.current.find((item) => item.id === projectId)
+    if (!current) return
+    const next = { ...current, files: [...current.files, ...created], updatedAt: currentTimestamp() }
+    projectsRef.current = projectsRef.current.map((item) => item.id === projectId ? next : item)
+    setProjects(projectsRef.current)
+    // The active project is saved by snapshotCurrent after React commits the
+    // streamed answer. Saving an older database snapshot here could erase it.
+    const stored = activeProjectIdRef.current === projectId ? null : await projectRepository.get(projectId)
+    if (stored) {
+      const existingIds = new Set(stored.files.map((item) => item.id))
+      await projectRepository.save({ ...stored, files: [...stored.files, ...created.filter((item) => !existingIds.has(item.id))], updatedAt: next.updatedAt })
+    }
+  }
+
   const runAi = async (action: AiAction, instruction = '') => {
     setError('')
     if (!source || !activeProjectId) return
@@ -1088,11 +1206,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     }
     const workspaceId = activeProjectId
     if (scope === 'combination' && activeProjectId === looseFilesId) { setError('当前文件不在组合中，无法使用“对组合”。'); return }
+    if (scope === 'selection' && visionAvailable) {
+      const images = selections.flatMap((item) => item.images)
+      const bytes = images.reduce((total, image) => total + (image.byteLength || Math.ceil((image.dataUrl?.length || 0) * .75)), 0)
+      if (images.length > maximumVisionImages || bytes > maximumVisionBytes) {
+        setError(`单次最多发送 ${maximumVisionImages} 张、合计 12 MB 的选区图片；请分批提问。`)
+        return
+      }
+    }
     const expectedContextScope = scope === 'combination' ? 'combination' : 'file'
     let conversationId = activeConversationId
     let previousHistory = history
     const activeRoute = conversations.find((item) => item.id === conversationId)
     const routeMatches = activeRoute && activeRoute.ownerType === 'file' && activeRoute.fileId === activeFileId && (activeRoute.contextScope || 'file') === expectedContextScope
+    let codexThreadId = routeMatches && activeRoute.codexThreadVersion === 2 ? activeRoute.codexThreadId || '' : ''
     if (!conversationId || !routeMatches) {
       // An empty active id represents a user-requested draft. Do not reuse an
       // older conversation; persist this one only when the first request starts.
@@ -1100,6 +1227,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       const conversation: Conversation = existing || { id: makeId(), title: t('untitledConversation'), history: [], ownerType: 'file', fileId: activeFileId || undefined, contextScope: expectedContextScope }
       conversationId = conversation.id
       previousHistory = conversation.history
+      codexThreadId = conversation.codexThreadVersion === 2 ? conversation.codexThreadId || '' : ''
       if (!existing) setConversations((items) => [...items, conversation])
       setActiveConversationId(conversationId)
       activeConversationIdRef.current = conversationId
@@ -1111,8 +1239,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     chatAutoFollowRef.current = true
     const targetUsesContext = scope !== 'selection'
     const targetIsProject = scope === 'combination'
-    const selectionImages = targetUsesContext ? [] : selections.flatMap((item) => item.images)
-    const selectionUsesText = !targetUsesContext && Boolean(selectedText.trim())
+    const capturedSelections = targetUsesContext ? [] : selections
+    const capturedSelectedText = targetUsesContext ? '' : selectedText
+    const selectionImages = capturedSelections.flatMap((item) => item.images)
+    const selectionUsesText = Boolean(capturedSelectedText.trim())
     const fastSelectionTranslation = selectionUsesText && action === 'translate'
     const reasoningActive = deepThinking && aiConfig.reasoningEnabled
     const actionLabel = (requestedSkillId ? skills.find((skill) => skill.id === requestedSkillId)?.name : effectiveInstruction) || ({ translate: t('translate'), explain: t('explain'), insight: t('insight'), summarize: t('summarize'), custom: 'AI' }[action])
@@ -1120,9 +1250,12 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     const scopeLabel = targetIsProject ? '组合' : targetUsesContext ? t('documentScope') : t('selectedScope')
     const userLabel = emptySelectionChat ? t('selectedScope') : `${scopeLabel} · ${actionLabel}`
     const activeProjectName = projects.find((item) => item.id === activeProjectId)?.name || source.name
-    const targetText = targetIsProject ? `组合：${activeProjectName}` : targetUsesContext ? `文件：${source.name}` : emptySelectionChat ? effectiveInstruction : (selectedText || `视觉选区 · ${selections.flatMap((item) => item.images).length} 张图片`)
+    const targetText = targetIsProject ? `组合：${activeProjectName}` : targetUsesContext ? `文件：${source.name}` : emptySelectionChat ? effectiveInstruction : (capturedSelectedText || `视觉选区 · ${selectionImages.length} 张图片`)
     const contextMode: ChatMessage['contextMode'] = scope
-    const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, prompt: effectiveInstruction || actionLabel, contextMode, label: userLabel, sourcePage: currentPage }
+    let attachments: ChatMessage['attachments'] = []
+    try { if (selectionImages.length) attachments = await retainSelectionImages(capturedSelections) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : '无法保存选区图片'); return }
+    const userMessage: ChatMessage = { id: makeId(), role: 'user', content: targetText, prompt: effectiveInstruction || actionLabel, contextMode, label: userLabel, sourcePage: currentPage, attachments }
     const assistantId = makeId()
     const assistantMessage: ChatMessage = { id: assistantId, role: 'assistant', content: '', contextMode, citationsDisabled: !targetUsesContext || targetIsProject }
     const requestHistory = [...previousHistory, userMessage]
@@ -1133,11 +1266,17 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       title: item.history.length ? item.title : actionLabel.slice(0, 32),
       history: visibleHistory,
     } : item))
-    setAiTaskContexts((items) => new Map(items).set(taskKey, { scope, selectionContext: scope === 'selection' && selectionContextEnabled }))
     setAiTasks((items) => new Set(items).add(taskKey))
     const requestController = new AbortController()
     abortControllersRef.current.set(taskKey, requestController)
     setCustomPrompt('')
+    if (!targetUsesContext && (capturedSelections.length || capturedSelectedText)) {
+      const consumed = new Set(capturedSelections.map((item) => item.id))
+      const remaining = selectionsRef.current.filter((item) => !consumed.has(item.id))
+      selectionsRef.current = remaining
+      setSelections(remaining)
+      setSelectedText(remaining.map((item) => item.text).filter(Boolean).join('\n\n'))
+    }
     try {
       // Full screenshots live on disk and are materialized only for the duration of this request.
       const requestImages: string[] = []
@@ -1146,37 +1285,45 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
       }
       const retrieval = targetUsesContext ? await buildProjectContext(workspaceId, effectiveInstruction || actionLabel, targetIsProject ? undefined : activeFileId || undefined) : { context: '', references: [] }
       const targetProject = snapshotCurrent()
-      const annotationContext = !targetUsesContext ? '' : targetIsProject
+      const annotationContext = !targetUsesContext || window.readingAssistant ? '' : targetIsProject
         ? (targetProject?.files || []).flatMap((file) => file.annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[${file.name}｜第 ${annotation.page} 页批注]\n${annotation.text.trim()}`)).join('\n\n')
         : annotations.filter((annotation): annotation is TextAnnotation => annotation.type === 'text' && Boolean(annotation.text.trim())).map((annotation) => `[第 ${annotation.page} 页批注]\n${annotation.text.trim()}`).join('\n\n')
       const documentText = [retrieval.context, annotationContext].filter(Boolean).join('\n\n')
-      if (targetUsesContext && !documentText) throw new Error(pack.code === 'en-US' ? 'The document has no readable text to process.' : '文档中没有可供处理的可读文字。')
+      const attachedIds = conversations.find((conversation) => conversation.id === conversationId)?.documentFileIds || []
+      const availableIds = attachedIds.filter((id) => targetProject?.files.some((file) => file.id === id))
+      const documentSource = 'documentSource' in retrieval ? retrieval.documentSource : undefined
+      const continuedDocumentSource = documentSource || (window.readingAssistant && availableIds.length ? { projectId: workspaceId, fileIds: availableIds } : undefined)
+      if (documentSource) updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, documentFileIds: documentSource.fileIds }))
+      if (targetUsesContext && !documentText && !('documentSource' in retrieval && retrieval.documentSource)) throw new Error(pack.code === 'en-US' ? 'The document has no readable text to process.' : '文档中没有可供处理的可读文字。')
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: requestController.signal,
         body: JSON.stringify({
           action,
-          selectedText: targetUsesContext ? '' : selectedText,
+          selectedText: capturedSelectedText,
           documentText,
+          documentSource: continuedDocumentSource,
           references: targetIsProject ? [] : retrieval.references,
           instruction: effectiveInstruction,
           includeContext: targetUsesContext && Boolean(retrieval.context),
           contextMode,
-          anchorPages: targetUsesContext ? [] : Array.from(new Set(selections.flatMap((item) => item.regions.map((region) => region.page)).concat(currentPage))),
-          history: targetUsesContext ? previousHistory.map(({ role, content, prompt }) => ({ role, content: role === 'user' ? prompt || content : content })) : selectionContextEnabled ? recentSelectionHistory(previousHistory) : [],
+          anchorPages: targetUsesContext ? [] : Array.from(new Set(capturedSelections.flatMap((item) => item.regions.map((region) => region.page)).concat(currentPage))),
+          history: recentSelectionHistory(previousHistory),
           aiConfig,
           deepThinking: fastSelectionTranslation ? false : reasoningActive,
           responseLanguage: pack.aiLanguage,
-          userMemory: targetUsesContext && memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
+          userMemory: memorySettings.userMemoryEnabled ? userMemoryRef.current : '',
           selectionHasImages: requestImages.length > 0,
           selectionImages: requestImages,
+          codexThreadId,
           skills: targetUsesContext || requestedSkillId ? skills.map(({ id, name, command, description, instructions }) => ({ id, name, command, description, instructions })) : [],
           requestedSkillId,
         }),
       })
       let streamedContent = ''
       const done = await readAiStream(response, (event) => {
+        if (event.type === 'thread') updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, codexThreadId: event.threadId, codexThreadVersion: 2 }))
         if (event.type === 'delta') {
           streamedContent += event.delta
           updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: streamedContent } : message) }))
@@ -1186,13 +1333,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetUsesContext && !targetIsProject && Array.isArray(event.references) ? event.references : undefined } : message) }))
         }
       })
+      if (done.files?.length) await addGeneratedTextFiles(workspaceId, done.files)
       learnUserMemory(effectiveInstruction || actionLabel, done.content)
     } catch (reason) {
       const message = requestController.signal.aborted ? (pack.code === 'en-US' ? 'Generation stopped.' : '已停止生成。') : reason instanceof Error ? reason.message : t('processFailed')
       updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((item) => item.id === assistantId ? { ...item, content: item.content ? `${item.content}\n\n⚠️ ${message}` : `⚠️ ${message}` } : item) }))
     } finally {
       abortControllersRef.current.delete(taskKey)
-      setAiTaskContexts((items) => { const next = new Map(items); next.delete(taskKey); return next })
       setAiTasks((items) => { const next = new Set(items); next.delete(taskKey); return next })
     }
   }
@@ -1201,10 +1348,19 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     if (currentAiTaskKey) abortControllersRef.current.get(currentAiTaskKey)?.abort()
   }
 
-  const deleteMessage = (id: string) => {
+  const deleteMessage = async (id: string) => {
+    const removed = history.find((message) => message.id === id)
+    const conversation = conversations.find((item) => item.id === activeConversationId)
+    try {
+      if (conversation?.codexThreadId) {
+        const response = await fetch('/api/ai/thread/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId: conversation.codexThreadId }) })
+        if (!response.ok) throw new Error('无法删除 Codex 对话记录，请重试')
+      }
+      if (removed?.attachments?.length) await deleteStoredSelectionImages(removed.attachments.map((image) => image.id))
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '无法删除选区图片'); return }
     const next = history.filter((message) => message.id !== id)
     setHistory(next)
-    setConversations((items) => items.map((item) => item.id === activeConversationId ? { ...item, history: next } : item))
+    setConversations((items) => items.map((item) => item.id === activeConversationId ? { ...item, history: next, codexThreadId: undefined } : item))
     setCitationFocus(null)
   }
 
@@ -1308,13 +1464,19 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
 
   const updatePanel = (id: PanelId, layout: PanelLayout) => {
     if (id === 'tags' && !layout.open) setRecentTagId(null)
+    if (id === 'chat' && !layout.open) chatSavedScrollTopRef.current = panelScrollRef.current?.scrollTop ?? chatSavedScrollTopRef.current
+    if (id === 'chat' && layout.open && !panelLayouts.chat.open) chatRestorePendingRef.current = true
     setPanelLayouts((items) => ({ ...items, [id]: layout }))
   }
   const raisePanel = (id: PanelId) => setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], z: nextPanelZ(items) } }))
   const togglePanel = useCallback((id: PanelId) => {
     if (id === 'tags' && panelLayouts.tags.open) setRecentTagId(null)
+    if (id === 'chat') {
+      if (panelLayouts.chat.open) chatSavedScrollTopRef.current = panelScrollRef.current?.scrollTop ?? chatSavedScrollTopRef.current
+      else chatRestorePendingRef.current = true
+    }
     setPanelLayouts((items) => ({ ...items, [id]: { ...items[id], open: !items[id].open, z: nextPanelZ(items) } }))
-  }, [panelLayouts.tags.open])
+  }, [panelLayouts.tags.open, panelLayouts.chat.open])
   const updatePanelOrder = useCallback((next: PanelId[]) => setPanelOrder((current) => current.length === next.length && current.every((id, index) => id === next[index]) ? current : next), [])
   const toggleAnnotationMode = () => {
     setAnnotationMode((active) => {
@@ -1335,7 +1497,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const toggleTagMode = () => {
     const next = !tagMode
     if (next) {
-      setAreaSelectionEnabled(false); setAnnotationMode(false); window.getSelection()?.removeAllRanges()
+      setAnnotationMode(false); window.getSelection()?.removeAllRanges()
     }
     setTagMode(next)
   }
@@ -1496,15 +1658,20 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     } catch (reason) { setError(reason instanceof Error ? reason.message : '分解组合失败。') }
   }
   const deleteConversationInProject = async (projectId: string, conversationId: string) => {
-    if (projectId === activeProjectId) { deleteConversation(conversationId); return }
+    if (projectId === activeProjectId) { await deleteConversation(conversationId); return }
     const project = projects.find((item) => item.id === projectId); if (!project) return
-    const hydrated = await hydrateProject(project); const next = { ...hydrated, conversations: hydrated.conversations.filter((item) => item.id !== conversationId), updatedAt: Date.now() }
+    const hydrated = await hydrateProject(project); const removed = hydrated.conversations.find((item) => item.id === conversationId)
+    try { if (removed) await forgetConversationAssets(removed) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : '无法删除对话资源'); return }
+    const next = { ...hydrated, conversations: hydrated.conversations.filter((item) => item.id !== conversationId), updatedAt: currentTimestamp() }
     await projectRepository.save(next); setProjects((items) => items.map((item) => item.id === projectId ? coolProject(next) : item))
   }
   const deleteProjectFile = async (projectId: string, fileId: string) => {
     let base = snapshotCurrent()?.id === projectId ? snapshotCurrent() : projects.find((project) => project.id === projectId)
     if (!base || !window.confirm('删除文件将永久删除该文件的对话、阅读位置、高亮、批注、标签、资源和索引。继续吗？')) return
     base = await hydrateProject(base)
+    try { for (const conversation of base.conversations.filter((item) => item.ownerType === 'file' && item.fileId === fileId)) await forgetConversationAssets(conversation) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : '无法删除文件关联的对话资源'); return }
     const removed = base.files.find((file) => file.id === fileId)
     if (removed?.source?.url) URL.revokeObjectURL(removed.source.url)
     const files = base.files.filter((file) => file.id !== fileId)
@@ -1558,8 +1725,7 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
   const tagContent = <TagPanel tags={projects.flatMap((project) => project.tags)} files={projects.flatMap((project) => project.files)} tagMode={tagMode} recentTagId={recentTagId} canGoBack={navigationDepth > 0} onToggleTagMode={toggleTagMode} onBack={() => void navigateBack()} onOpen={openTag} onRename={renameTag} onDelete={deleteTag} onDismissRecent={() => setRecentTagId(null)} />
 
   const selectionHasImages = selections.some((selection) => selection.images.length > 0)
-  const activeThinkingContext = aiTaskContexts.get(currentAiTaskKey)
-  const activeThinkingLabel = activeThinkingContext?.scope === 'selection' && !activeThinkingContext.selectionContext ? t('thinkingDirect') : t('thinking')
+  const activeThinkingLabel = t('processing')
   const selectionContent = <div className="selection-panel-body single" ref={selectionBodyRef}><section className="selection-content-section">
     <div className="section-label"><span>{t('selectedContent')} · {selections.length}</span>{selections.length > 0 && <button onClick={clearCapturedSelections}><X size={14} /> {t('clear')}</button>}</div>
     {selections.length === 0 ? <div className="selection-empty"><MousePointer2 size={22} /></div> : <div className={`selection-result-split ${selectionHasImages ? 'with-images' : 'text-only'}`} ref={selectionSplitRef} style={selectionHasImages ? { gridTemplateRows: `minmax(72px, ${selectionSplitRatio}fr) 7px minmax(72px, ${1 - selectionSplitRatio}fr)` } : undefined}>{selectionHasImages && <div className="selection-image-pane" ref={selectionImagesRef}><div className="selection-strip">{selections.flatMap((selection) => selection.images.map((image, imageIndex) => <div className="selection-thumb" key={`${selection.id}-${imageIndex}`}>{image.preview ? <img src={image.preview} alt="选区预览" /> : <div className="selection-thumb-placeholder">P{selection.regions[imageIndex]?.page || selection.page}</div>}{selection.loading && <span><LoaderCircle className="spin" size={10} /></span>}<button className="remove-selection-image" onClick={() => removeSelectionImage(selection.id, imageIndex)}><X size={11} /></button></div>))}</div></div>}{selectionHasImages && <div className="section-resizer" role="separator" aria-label="调整选区图片与识别文字高度" aria-orientation="horizontal" title="拖动调整图片与识别文字高度" onPointerDown={startSelectionSplit} onPointerMove={moveSelectionSplit} onPointerUp={stopSelectionSplit} onPointerCancel={stopSelectionSplit} />}{busy === 'ocr' ? <div className="inline-loading selection-text-pane"><LoaderCircle className="spin" size={16} /> {progress}</div> : <textarea className="selection-text-pane" ref={selectionTextRef} value={selectedText} onChange={(e) => setSelectedText(e.target.value)} />}</div>}
@@ -1580,13 +1746,13 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
     </section>
     <div className="panel-scroll" ref={panelScrollRef} onWheelCapture={(event) => { if (event.ctrlKey) { event.preventDefault(); setAiFontSize((value) => Math.max(10, Math.min(26, value + (event.deltaY < 0 ? 1 : -1)))); return } stopFollowingOnUpwardWheel(event.currentTarget, event.deltaY, event.deltaMode) }} onScroll={(event) => trackChatPosition(event.currentTarget)}>
       <section className="conversation">
-        <ConversationMessages history={history} deleteMessage={deleteMessage} openReference={openReference} />
+        <Suspense fallback={null}><ConversationMessages key={activeConversationId} history={history} deleteMessage={deleteMessage} openReference={openReference} /></Suspense>
         {currentAiBusy && <div className="thinking"><LoaderCircle className="spin" size={18} /><span>{activeThinkingLabel}</span><button onClick={stopAi}><Square size={13} />停止</button></div>}
         <div ref={resultsEndRef} />
       </section>
       {error && <div className="error-banner"><X size={15} /><span>{error}</span></div>}
     </div>
-    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}{selectionPromptAttachments}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'combination' ? '针对整个组合提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><span className="prompt-mode-switches"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label>{scope === 'selection' && <label className="reasoning-switch" title="开启后附带最近的选区问答；关闭时速度更快"><input type="checkbox" checked={selectionContextEnabled} onChange={(event) => { setSelectionContextEnabled(event.target.checked); localStorage.setItem('reading-assistant-selection-context', String(event.target.checked)) }} /><span className="switch-track"><i /></span><BrainCircuit size={12} />上下文</label>}</span><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
+    <div className="prompt-area"><div className="prompt-height-resizer" onPointerDown={startPromptResize} role="separator" aria-orientation="horizontal" />{aiConfig.provider !== 'codex' && !aiConfig.apiKey && !configured && <button className="config-warning" onClick={openSettings}>{t('notConfigured')}</button>}{skillSuggestions.length > 0 && <div className="skill-command-menu">{skillSuggestions.map((skill) => <button key={skill.id} onClick={() => setCustomPrompt(`/${skill.command} `)}><Puzzle size={14} /><span><strong>/{skill.command}</strong><small>{skill.name}</small></span></button>)}</div>}{selectionPromptAttachments}<div className="prompt-box" style={{ height: promptHeight }}><textarea value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (customPrompt.trim()) runAi('custom', customPrompt.trim()) } }} placeholder={scope === 'combination' ? '针对整个组合提问…' : scope === 'document' ? t('promptDocument') : t('promptSelection')} /><button disabled={!!busy || currentAiBusy || !customPrompt.trim()} onClick={() => runAi('custom', customPrompt.trim())}><Send size={17} /></button></div><small className="prompt-hint"><span className="prompt-mode-switches"><label className="reasoning-switch"><input type="checkbox" checked={deepThinking && aiConfig.reasoningEnabled} disabled={!aiConfig.reasoningEnabled} onChange={(event) => setDeepThinking(event.target.checked)} /><span className="switch-track"><i /></span><Sparkles size={12} />{t('deepThinking')}</label></span><span>{t('sendHint')} · <button onClick={() => setCustomPrompt('/')}>{t('chooseSkillHint')}</button></span></small></div>
   </div>
 
   const panelContent: Record<PanelId, ReactNode> = { projects: projectContent, selection: selectionContent, chat: chatContent, tags: tagContent }
@@ -1658,7 +1824,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           languages={getLanguagePacks()}
           memorySettings={memorySettings}
           userMemory={userMemory}
-          quickOpenEnabled={quickOpenEnabled}
           shortcutSettings={shortcutSettings}
           onClose={() => setSettingsOpen(false)}
           onImportSkill={importSkillFolder}
@@ -1667,16 +1832,6 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           onLanguageChange={changeLanguage}
           onMemorySettingsChange={changeMemorySettings}
           onUserMemoryChange={changeUserMemory}
-          onQuickOpenChange={async (enabled) => {
-            setQuickOpenEnabled(enabled)
-            try {
-              const next = await window.readingAssistant?.setQuickOpenEnabled(enabled)
-              setQuickOpenEnabled(Boolean(next))
-            } catch (reason) {
-              setQuickOpenEnabled(!enabled)
-              setError(reason instanceof Error ? reason.message : '无法更新右键快捷打开设置。')
-            }
-          }}
           onShortcutSettingsChange={(settings) => { setShortcutSettings(settings); localStorage.setItem('reading-assistant-shortcuts', JSON.stringify(settings)) }}
           onSave={(config) => {
             setAiConfig(config)

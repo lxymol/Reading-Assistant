@@ -16,7 +16,6 @@ export const defaultAiConfig: AiConfig = {
   reasoningModel: '',
   codexModel: '',
   codexReasoningModel: '',
-  codexAgentEnabled: true,
 }
 
 const readJson = <T,>(key: string, fallback: T): T => {

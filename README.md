@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-2.1.0-3794ff)
+![Version](https://img.shields.io/badge/version-2.2.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid is a lightweight, extensible AI reader for papers, textbooks, and technical documents. It brings multi-file organization, continuous reading, precise selection, OCR, annotations, document tags, retrieval-grounded AI conversations, and user-configured models into one focused desktop workspace.
@@ -21,7 +21,7 @@ Raid is a lightweight, extensible AI reader for papers, textbooks, and technical
 - Follow source-linked AI citations back to the exact file, page, and region
 - Dock tools on either side or detach them as floating windows
 - Use an OpenAI-compatible API or a locally signed-in Codex account, with separate default, vision, and reasoning models
-- Import Skills and language packs, enable optional user memory, and configure Windows Explorer's “Open with Raid” command
+- Import Skills and language packs and enable optional user memory
 
 ## Interface preview
 
@@ -39,28 +39,37 @@ Conversations belong to the file from which they were created and appear beneath
 
 ## AI context strategy
 
-Raid uses retrieval-augmented context without requiring a vector database:
+Raid supplies questions, selections, and documents as normal conversation input, without forcing a paper-tutor persona or a fixed analysis procedure:
 
-- **Selection:** sends the current edited selection text and, when a vision model is available, all current visual selection images. Recent selection-chat turns are included, while document and user-memory context are excluded.
-- **Document:** sends locally extracted context from the current file. Documents that fit the context budget can use exact full text; larger documents use question-ranked passages plus representative coverage across the file.
-- **Combination:** retrieves across every file in the current combination while preserving evidence diversity between files.
-- **Citations:** document and combination answers use inline source badges attached to the claims they support. A badge can navigate to its source file, page, and region; deleting the message also deletes its temporary AI citations.
+- **Selection:** sends the current edited text and visual images when supported. Selection conversation context is included by default. After sending, images move to the user message, where thumbnails can open the original on demand.
+- **Document:** supplies the complete readable text. Codex can read the whole attachment rather than only retrieved passages. Text files preserve their original UTF-8 contents; PDF attachments contain extracted text and page numbers. Scans need OCR, and visual selections can supply figures.
+- **Combination:** exports each complete document separately for the model to read and compare. Documents are accessed by attachment ID; the renderer does not retain every full index.
+- **API mode:** supplies complete text up to 300,000 characters per request. Oversized input produces an explicit error rather than a silently truncated document.
+- **Citations:** document mode retains clickable reference locations without limiting the answer to retrieved excerpts.
 - **Annotations:** visible ink is composited into visual selections, while relevant text annotations are added to extracted context. Overlapping highlights are normalized so text is not highlighted in duplicate layers.
 
 Selection OCR is an editable aid rather than the only evidence path: when a visual selection is available, Raid can send both its recognized text and original image so the model can verify characters that OCR did not reproduce precisely.
 
-### Restricted Codex Agent
+### Codex tools
 
-When Codex connection and **Restricted agent mode** are enabled, custom questions may be split into up to four tool steps. Raid executes a small allowlist of document search, current-time, and fixed-endpoint web-search tools. Inputs are validated and search results are treated as untrusted reference data. The agent does not receive terminal, arbitrary file-writing, code-editing, or desktop-control access. Translation, explanation, summary, and other direct actions keep the faster single-request path.
+Raid uses [Codex App Server](https://learn.chatgpt.com/docs/app-server) with persistent conversations and the local Codex default model when no model is specified. Only final answers are displayed; reasoning and interim commentary are hidden. Skills apply only when explicitly selected. Earlier selection images are restored within the request budget, while resumed native threads retain their own multimodal history.
+
+General local commands, arbitrary-path image reads, external MCP servers, and plugin file entry points are disabled. The model reads complete supplied documents through `read_attachment` and `search_attachments`, with about 32 KB per read. Requested output is written through `create_text_file` and imported into the file pane. Temporary attachments and tool routes are removed on completion or cancellation; the Codex child exits after 90 idle seconds. Existing conversations retain their Raid history and migrate to the attachment-tool integration when next used.
+
+Model choice, reasoning settings, tools, and context affect answers. Native conversation integration cannot guarantee identical wording or accuracy to the ChatGPT product.
 
 ## Large-document and memory strategy
 
-- PDF pages are rendered only when visible or near the reading position; distant pages keep their layout space but release canvases and PDF.js page resources.
+- PDF pages are rendered after a brief stay near the reading position; pages crossed during rapid scrolling stay as placeholders. Distant pages release canvases and PDF.js page resources.
 - The current page and nearby pages receive rendering priority. OCR is deferred until a selection or explicit text need requires it, and the OCR worker exits after an idle period.
 - Switching files destroys the previous PDF loading task and revokes temporary object URLs.
 - Inactive combinations keep lightweight summaries in memory. Their full file metadata, conversations, and indexes are rehydrated from local storage only when opened.
+- Full selection images are stored separately from conversation records; unopened conversations do not load them, and deleting a message, conversation, or its file removes the corresponding images.
+- Long conversations initially render the latest 40 messages; older messages load on request, and offscreen thumbnails are released. A visual request is limited to eight images and 12 MB.
+- On Windows, software compositing prevents Chromium's GPU process from accumulating PDF page textures during repeated scrolling.
 
 These controls bound normal memory use around the active reading set instead of the total page count or the total size of the library.
+`npm run test:memory` opens a 120-page PDF in a hidden desktop window, scrolls through it six times, and checks that the reading process group's working-set sum stays below 500 MB without continued growth. It also checks private committed memory with the Codex child running. Summing working sets counts shared pages repeatedly, so both measures are reported. The threshold is verified for this scenario; real generation, very large files, and other machines need separate measurement.
 
 ## Local storage
 
@@ -72,7 +81,7 @@ User memory is a separate, optional, editable profile for stable background and 
 
 Download the Windows installer from [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases). Raid does not modify system environment variables and does not require a separate Node.js installation.
 
-Current version: `2.1.0`.
+Current version: `2.2.0`.
 
 ## AI configuration
 
@@ -113,10 +122,11 @@ npm run desktop:test
 npm run lint
 npm test
 npm run build
+npm run test:memory
 npm run desktop:pack
 ```
 
-The Windows installer is written to `release-2.1.0`.
+The Windows installer is written to `release-2.2.0`.
 
 ## Privacy and security
 

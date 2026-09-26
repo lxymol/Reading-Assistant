@@ -120,6 +120,34 @@ try {
     await waitFor(() => lateBuffer.width === 0 && lateBuffer.height === 0)
     check(displayedCanvas.width === 0, 'Unmount retained displayed pixels')
     canvasHost.remove()
+    const imageCache = await import('/src/services/selectionImageCache.ts')
+    const { default: ConversationMessages } = await import('/src/components/ConversationMessages.tsx')
+    const selectionCanvas = document.createElement('canvas')
+    selectionCanvas.width = 600; selectionCanvas.height = 400
+    selectionCanvas.getContext('2d').fillRect(0, 0, 600, 400)
+    const cachedSelection = await imageCache.cacheSelectionCanvas(selectionCanvas)
+    const storedAttachments = await imageCache.retainSelectionImages([{ id: 'sample', image: cachedSelection.preview, images: [cachedSelection], page: 3, regions: [{ page: 3, region: { left: 0, top: 0, width: 1, height: 1 } }], text: '', textParts: [], loading: false }])
+    check(storedAttachments.length === 1, 'Selection image was not attached to the message')
+    const conversationHost = document.createElement('div')
+    conversationHost.className = 'panel-scroll'
+    document.body.append(conversationHost)
+    const conversationRoot = ReactDOM.createRoot(conversationHost)
+    conversationRoot.render(React.createElement(ConversationMessages, { history: [{ id: 'sample-message', role: 'user', content: 'Selection', attachments: storedAttachments }], deleteMessage: () => {}, openReference: () => {} }))
+    await waitFor(() => conversationHost.querySelector('.conversation-selection-thumb img'))
+    conversationHost.querySelector('.conversation-selection-thumb').click()
+    await waitFor(() => document.querySelector('.selection-image-viewer img'))
+    document.querySelector('.selection-image-viewer button').click()
+    await waitFor(() => !document.querySelector('.selection-image-viewer'))
+    conversationRoot.render(React.createElement(ConversationMessages, { history: Array.from({ length: 120 }, (_, index) => ({ id: 'history-' + index, role: 'user', content: 'Question ' + index })), deleteMessage: () => {}, openReference: () => {} }))
+    await waitFor(() => conversationHost.querySelector('.load-older-messages'))
+    check(conversationHost.querySelectorAll('.user-event').length === 40, 'Long conversations rendered all historical messages')
+    conversationHost.querySelector('.load-older-messages').click()
+    await waitFor(() => conversationHost.querySelectorAll('.user-event').length === 80)
+    conversationRoot.unmount(); conversationHost.remove()
+    await imageCache.deleteStoredSelectionImages(storedAttachments.map(item => item.id))
+    let imageWasRemoved = false
+    try { await imageCache.loadStoredSelectionImage(storedAttachments[0].id) } catch { imageWasRemoved = true }
+    check(imageWasRemoved, 'Deleting a conversation left its selection image in storage')
     // A real 120-page PDF must load only the reading window, then release
     // page image/operator resources while repeatedly moving through the file.
     const { default: DocumentViewer } = await import('/src/components/DocumentViewer.tsx')
@@ -174,6 +202,7 @@ try {
       maximumCanvasBytes = Math.max(maximumCanvasBytes, canvasBytes)
       check(canvasBytes < 72 * 1024 * 1024, 'PDF canvas allocation grew beyond the reading window')
     }
+    check(requestedPages.size < 40, 'Transient PDF pages were decoded during rapid scrolling')
     pdfRoot.unmount()
     await waitFor(() => openedPdf.loadingTask.destroyed)
     pdfHost.remove()
@@ -220,17 +249,44 @@ try {
     finally { IDBDatabase.prototype.transaction = originalTransaction }
     check(rejected, 'Aborted write did not reject')
     check((await repository.get(project.id)).name === 'Test', 'Aborted write changed data')
+    project.conversations = [{ id: 'chat', history: [{ role: 'assistant', content: 'Retained answer' }] }]
+    project.files[0].paragraphs = [{ text: 'Original index' }]
+    await repository.save(project)
+    const lightweight = await repository.get(project.id, true)
+    await Promise.all([
+      repository.save({ ...project, files: [{ ...project.files[0], paragraphs: [{ text: 'New index' }] }] }),
+      repository.save({ ...lightweight, name: 'Concurrent rename' }),
+    ])
+    const merged = await repository.get(project.id)
+    check(merged.name === 'Concurrent rename', 'Concurrent rename lost')
+    check(merged.files[0].paragraphs[0].text === 'New index', 'Partial save replaced a newer index')
+    check(merged.conversations[0].history[0].content === 'Retained answer', 'Lightweight save erased history')
+    check((await repository.list()).find(item => item.id === project.id).conversationCount === 1, 'Cursor summary lost conversations')
+    await repository.saveSource(project.id, 'orphan', new File(['Orphaned import'], 'orphan.txt'))
     await repository.deleteProject(project.id)
     check(await repository.get(project.id) === null, 'Project deletion failed')
     check(await repository.getSource(project.id, 'source', 'text/plain') === null, 'Source deletion failed')
+    check(await repository.getSource(project.id, 'orphan', 'text/plain') === null, 'Orphaned source deletion failed')
 
-    const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), value => value.charCodeAt(0))
+    const importCanvas = document.createElement('canvas')
+    importCanvas.width = 1200
+    importCanvas.height = 900
+    importCanvas.getContext('2d').fillRect(0, 0, 1200, 900)
+    const imageBlob = await new Promise(resolve => importCanvas.toBlob(resolve, 'image/png'))
     const transfer = new DataTransfer()
-    transfer.items.add(new File([bytes], 'conversation-test.png', { type: 'image/png' }))
+    transfer.items.add(new File([imageBlob], 'conversation-test.png', { type: 'image/png' }))
     const input = document.querySelector('.empty-library-add input')
     Object.defineProperty(input, 'files', { configurable: true, value: transfer.files })
     input.dispatchEvent(new Event('change', { bubbles: true }))
     await waitFor(() => document.querySelector('.library-file'))
+    await waitFor(() => {
+      const reader = document.querySelector('.reader-scroll')
+      const canvas = reader?.querySelector('.image-page canvas')
+      if (!canvas?.width) return false
+      const style = getComputedStyle(reader)
+      const available = reader.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 12
+      return Math.abs(parseFloat(canvas.style.width) - available) < 3
+    })
     check(!document.querySelector('.file-chat-count'), 'Import created an empty conversation')
     document.querySelector('button[title="对话"]').click()
     await waitFor(() => document.querySelector('button[title="新对话"]'))
@@ -239,7 +295,7 @@ try {
 
     const originalFetch = window.fetch
     window.fetch = async (url, options) => String(url).endsWith('/api/ai')
-      ? new Response('{"type":"done","content":"Done"}\\n', { status: 200 })
+      ? new Response(JSON.stringify({ type: 'done', content: Array.from({ length: 100 }, (_, index) => 'Line ' + index).join(String.fromCharCode(10, 10)) }) + String.fromCharCode(10), { status: 200 })
       : originalFetch(url, options)
     const prompt = document.querySelector('.prompt-box textarea')
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(prompt, 'Hello')
@@ -247,6 +303,39 @@ try {
     await new Promise(resolve => setTimeout(resolve, 0))
     document.querySelector('.prompt-box button').click()
     await waitFor(() => document.querySelector('.file-chat-count')?.textContent === '1')
+    const chatScroll = document.querySelector('.panel-chat .panel-scroll')
+    await waitFor(() => chatScroll.scrollHeight > chatScroll.clientHeight + 400)
+    chatScroll.scrollTop = 240
+    chatScroll.dispatchEvent(new Event('scroll', { bubbles: true }))
+    document.querySelector('.panel-chat button[title="关闭"]').click()
+    await waitFor(() => !document.querySelector('.panel-chat'))
+    document.querySelector('button[title="对话"]').click()
+    await waitFor(() => document.querySelector('.panel-chat .panel-scroll'))
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    check(Math.abs(document.querySelector('.panel-chat .panel-scroll').scrollTop - 240) < 3, 'Chat position changed after reopening')
+    window.fetch = async (url, options) => String(url).endsWith('/api/ai')
+      ? new Response(JSON.stringify({ type: 'done', content: 'Created notes.md', files: [{ name: 'notes.md', content: '# Generated note' }] }) + String.fromCharCode(10), { status: 200 })
+      : originalFetch(url, options)
+    const filePrompt = document.querySelector('.prompt-box textarea')
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(filePrompt, 'Make a text file')
+    filePrompt.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    document.querySelector('.prompt-box button').click()
+    await waitFor(() => Array.from(document.querySelectorAll('.library-file')).some(item => item.textContent.includes('notes.md')))
+    Array.from(document.querySelectorAll('.library-file')).find(item => item.textContent.includes('notes.md')).click()
+    await waitFor(() => document.querySelector('.text-document-stack pre')?.textContent === '# Generated note')
+    let fullRequest
+    window.fetch = async (url, options) => String(url).endsWith('/api/ai')
+      ? (fullRequest = JSON.parse(options.body), new Response(JSON.stringify({ type: 'done', content: 'Full document answer' }) + String.fromCharCode(10), { status: 200 }))
+      : originalFetch(url, options)
+    document.querySelectorAll('.scope-switch button')[1].click()
+    const fullPrompt = document.querySelector('.prompt-box textarea')
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(fullPrompt, 'Read the entire file.')
+    fullPrompt.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    document.querySelector('.prompt-box button').click()
+    await waitFor(() => fullRequest && document.querySelector('.answer-card')?.textContent.includes('Full document answer'))
+    check(fullRequest.documentText.includes('# Generated note'), 'Full-document mode did not supply the actual file text')
     window.fetch = originalFetch
     return { ui: 'workspace and lazy conversation creation passed', memory: { canvasCycles: 20, pdfPageCount: 120, scrollCycles: 60, maximumCanvasBytes }, storage: 'round-trip, commit, rollback, connection reuse, cascade deletion passed' }
   })()`, awaitPromise: true, returnByValue: true }, sessionId)

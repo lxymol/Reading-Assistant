@@ -1,4 +1,4 @@
-import { BookOpen, BrainCircuit, FolderOpen, Moon, Pen, Settings2, Sun, Tag } from 'lucide-react'
+import { BrainCircuit, FolderOpen, Moon, Pen, Settings2, Sun, Tag } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import type { PanelId } from '../types'
 
@@ -110,7 +110,7 @@ export default function ActivityBar({ openPanels, hasSource, dark, annotationAct
   }
 
   return <nav className={`activity-bar activity-${side} ${drag?.moved && !drag.settling ? 'activity-dragging' : ''} ${committingOrder ? 'activity-order-committing' : ''}`}>
-    <div className="activity-logo" draggable onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-raid-activity', side) }} onDragEnd={(event) => { if (event.clientX > window.innerWidth / 2) onSideChange('right'); else onSideChange('left') }} title="拖到窗口另一侧"><BookOpen size={28} strokeWidth={2.3} /></div>
+    <div className="activity-logo" draggable onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-raid-activity', side) }} onDragEnd={(event) => { if (event.clientX > window.innerWidth / 2) onSideChange('right'); else onSideChange('left') }} title="拖到窗口另一侧"><img src="/app-icon.svg" alt="Raid" width={30} height={30} draggable={false} /></div>
     {order.map((id) => <span className="activity-reorder-item" data-reorder-state={drag?.id === id ? (drag.settling ? 'settling' : 'dragging') : undefined} key={id} style={itemStyle(id)} onPointerDown={(event) => startDrag(id, event)} onPointerMove={moveDrag} onPointerUp={(event) => finishDrag(event, true)} onPointerCancel={(event) => finishDrag(event, false)} onClickCapture={(event) => { if (suppressClickRef.current) { event.preventDefault(); event.stopPropagation() } }}>{items[id]}</span>)}
     <span className="activity-spacer" />
     <button onClick={onToggleTheme} title={dark ? labels.light : labels.dark}>{dark ? <Sun /> : <Moon />}</button>

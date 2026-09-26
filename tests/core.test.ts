@@ -31,7 +31,7 @@ test('AI stream reports HTTP errors, server errors and incomplete responses', as
   await assert.rejects(readAiStream(new Response('{"type":"delta","delta":"Partial"}\n'), () => {}), /before completion/)
 })
 
-test('selection history retains context boundaries and caps prompts', () => {
+test('conversation history preserves prior modes and complete message text', () => {
   const messages: ChatMessage[] = [
     { id: '1', role: 'user', label: '选区', content: 'Excerpt', prompt: 'Explain' },
     { id: '2', role: 'assistant', content: 'Explanation' },
@@ -40,9 +40,21 @@ test('selection history retains context boundaries and caps prompts', () => {
     { id: '5', role: 'assistant', citationsDisabled: true, content: 'x'.repeat(5000) },
   ]
   const result = recentSelectionHistory(messages)
-  assert.equal(result.length, 3)
-  assert.equal(result[0].content, 'Explain\n【当时选区】\nExcerpt')
-  assert.equal(result[2].content.length, 4000)
+  assert.equal(result.length, 5)
+  assert.equal(result[0].content, 'Explain\n\nExcerpt')
+  assert.equal(result[2].content, 'Whole document')
+  assert.equal(result[4].content.length, 5000)
+})
+
+test('selection follow-ups retain earlier questions without a manual context switch', () => {
+  const messages: ChatMessage[] = Array.from({ length: 6 }, (_, index) => [
+    { id: `user-${index}`, role: 'user' as const, contextMode: 'selection' as const, prompt: `Question ${index}`, content: index === 0 ? 'Original excerpt' : `Follow-up ${index}` },
+    { id: `answer-${index}`, role: 'assistant' as const, contextMode: 'selection' as const, content: `Answer ${index}` },
+  ]).flat()
+  const result = recentSelectionHistory(messages)
+  assert.equal(result.length, 12)
+  assert.match(result[0].content, /Original excerpt/)
+  assert.equal(result.at(-1)?.content, 'Answer 5')
 })
 
 test('PDF text selection restores a clipped first letter only at a word boundary', () => {
@@ -209,4 +221,33 @@ test('inline citations keep only valid structured reference numbers at sentence 
   assert.equal(inlineCitationsToMarkdown('第一句。[[REF:2]] 第二句。[[REF:9]]', references), '第一句。[2](#raid-reference-2) 第二句。')
   assert.equal(referenceNumberFromHref('#raid-reference-2'), 2)
   assert.equal(referenceNumberFromHref('#other-2'), null)
+})
+
+
+test('AI streams cancel and unlock on terminal events and callback failures', async () => {
+  for (const [line, failure] of [
+    ['{"type":"done","content":"Answer"}', false],
+    ['{"type":"error","error":"Failed"}', true],
+    ['{"type":"delta","delta":42}', true],
+    ['invalid-json', true],
+  ] as const) {
+    let canceled = false
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(line + '\n')) },
+      cancel() { canceled = true },
+    })
+    const request = readAiStream(new Response(body), () => {})
+    if (failure) await assert.rejects(request)
+    else assert.equal((await request).content, 'Answer')
+    assert.equal(canceled, true)
+    assert.equal(body.locked, false)
+  }
+  let canceled = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"delta","delta":"a"}\n')) },
+    cancel() { canceled = true },
+  })
+  await assert.rejects(readAiStream(new Response(body), () => { throw new Error('UI unmounted') }), /UI unmounted/)
+  assert.equal(canceled, true)
+  assert.equal(body.locked, false)
 })

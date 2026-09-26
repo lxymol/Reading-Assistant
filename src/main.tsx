@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import App from './App'
 import AppErrorBoundary from './components/AppErrorBoundary'
 import { I18nProvider, registerLanguagePack, type LanguagePack } from './i18n'
+import 'katex/dist/katex.min.css'
 import './styles.css'
 
 try {

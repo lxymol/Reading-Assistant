@@ -32,6 +32,23 @@ function fixture(t) {
   return { options, storage, record, directory, fileDirectory }
 }
 
+test('AI attachments contain every paragraph and original text bytes across multiple files', (t) => {
+  const { storage, record, directory } = fixture(t)
+  const paragraphs = Array.from({ length: 300 }, (_, order) => ({ page: order + 1, order, text: `Paragraph ${order}: ${'body '.repeat(100)} TAIL-${order}` }))
+  record.files[0].paragraphs = paragraphs
+  record.files.push({ ...record.files[0], id: 'second', kind: 'text', name: '../源文.txt', paragraphs: [] })
+  storage.saveProjectRecord(record)
+  const original = '# Exact text\r\n' + 'x'.repeat(100000) + '\r\nEND-OF-SECOND-FILE'
+  storage.saveProjectFileSource({ projectId: record.id, fileId: 'second', data: Buffer.from(original) })
+  const documents = storage.writeAiDocuments(record.id, ['file', 'second'], directory)
+  assert.equal(documents.length, 2)
+  const paper = fs.readFileSync(documents[0].path, 'utf8')
+  for (let index = 0; index < 300; index++) assert.ok(paper.includes(`TAIL-${index}`))
+  assert.equal(fs.readFileSync(documents[1].path, 'utf8'), original)
+  assert.ok(documents.every((document) => path.dirname(document.path) === path.join(directory, 'attachments')))
+  assert.throws(() => storage.writeAiDocuments(record.id, ['missing'], directory), /INVALID_DOCUMENT_ATTACHMENT/)
+})
+
 test('v2 storage round-trips records and binary sources; lightweight reads omit heavy data', (t) => {
   const { storage, record, fileDirectory } = fixture(t)
   storage.saveProjectRecord(record)
@@ -146,4 +163,30 @@ test('worker preserves write/read/delete order, survives operation errors and dr
     assert.equal(storage.readProjectRecord('project').updatedAt, 99)
     await assert.rejects(client.call('readProjectRecord', 'project'), /closing|exited/)
   } finally { await client.close() }
+})
+
+
+test('saving lightweight project metadata preserves histories and indexes but supports explicit history deletion', (t) => {
+  const { storage, record } = fixture(t)
+  storage.saveProjectRecord(record)
+  const lightweight = storage.readProjectRecord(record.id, true)
+  lightweight.name = 'Renamed'
+  lightweight.conversations[0].title = 'Renamed conversation'
+  storage.saveProjectRecord(lightweight)
+  const restored = storage.readProjectRecord(record.id)
+  assert.equal(restored.name, 'Renamed')
+  assert.equal(restored.conversations[0].title, 'Renamed conversation')
+  assert.deepEqual(restored.conversations[0].history, record.conversations[0].history)
+  assert.deepEqual(restored.files[0].paragraphs, record.files[0].paragraphs)
+  assert.equal(Object.hasOwn(restored.conversations[0], 'historyLoaded'), false)
+  restored.conversations[0].history = []
+  storage.saveProjectRecord(restored)
+  assert.deepEqual(storage.readProjectRecord(record.id).conversations[0].history, [])
+})
+
+test('source saves preserve typed-array view boundaries without copying surrounding bytes', (t) => {
+  const { storage } = fixture(t)
+  const bytes = new Uint8Array([9, 1, 2, 3, 9])
+  storage.saveProjectFileSource({ projectId: 'project', fileId: 'file', data: bytes.subarray(1, 4) })
+  assert.deepEqual(storage.getProjectFileSource('project', 'file'), new Uint8Array([1, 2, 3]))
 })

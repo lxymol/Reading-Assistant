@@ -129,7 +129,7 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     const outputScale = Math.min(requestedScale, Math.sqrt(maximumPixels / Math.max(1, displayViewport.width * displayViewport.height)))
     const viewport = page.getViewport({ scale: 0.82 * zoom * outputScale })
     const context = canvas.getContext('2d')
-    if (!context) return
+    if (!context) { page.cleanup(); return }
     canvas.width = Math.max(1, Math.floor(viewport.width))
     canvas.height = Math.max(1, Math.floor(viewport.height))
     canvas.style.width = `${displayViewport.width}px`
@@ -151,14 +151,14 @@ function PdfPage({ pdf, pageNumber, zoom, inverted, textSelectionEnabled, highli
     let active = true
     let layer: TextLayer | null = null
     void pdf.getPage(pageNumber).then(async (page) => {
-      if (!active) return
-      const viewport = page.getViewport({ scale: 0.82 * zoom })
-      container.style.setProperty('--total-scale-factor', String(0.82 * zoom))
-      container.style.setProperty('--scale-round-x', '1px')
-      container.style.setProperty('--scale-round-y', '1px')
-      const content = await page.getTextContent()
-      if (!active) { page.cleanup(); return }
       try {
+        if (!active) return
+        const viewport = page.getViewport({ scale: 0.82 * zoom })
+        container.style.setProperty('--total-scale-factor', String(0.82 * zoom))
+        container.style.setProperty('--scale-round-x', '1px')
+        container.style.setProperty('--scale-round-y', '1px')
+        const content = await page.getTextContent()
+        if (!active) return
         layer = new TextLayer({ textContentSource: content, container, viewport })
         await layer.render()
         const legacyHighlights = highlights.filter((item) => item.page === pageNumber && !item.regions?.length)
@@ -225,7 +225,12 @@ function LazyPdfPage({ priority, ...props }: PdfPageProps & { priority: boolean 
   const shellRef = useRef<HTMLDivElement>(null)
   const [pageSize, setPageSize] = useState({ widthAtZoom1: 500, heightAtZoom1: 710 })
   const [nearViewport, setNearViewport] = useState(priority)
-  const shouldRender = nearViewport || priority
+  const [shouldRender, setShouldRender] = useState(false)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShouldRender(nearViewport || priority), nearViewport || priority ? 150 : 0)
+    return () => window.clearTimeout(timer)
+  }, [nearViewport, priority])
 
   useEffect(() => {
     const shell = shellRef.current
@@ -334,7 +339,7 @@ async function renderPdfSelection(pdf: PDFDocumentProxy, pageNumber: number, zoo
   }
 }
 
-export default function DocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, tagMode, tags, onCreateTag, onMoveTag, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotationStrokeWidth, annotations, onAnnotationsChange }: Props) {
+function GraphicDocumentViewer({ source, zoom, currentPage, inverted, areaSelectionEnabled, tagMode, tags, onCreateTag, onMoveTag, onPdfReady, onSelect, onTextAi, onTextTranslate, highlights, onHighlight, citationFocus, annotationMode, annotationTool, annotationColor, annotationStrokeWidth, annotations, onAnnotationsChange }: Props) {
   const { t, pack } = useI18n()
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [error, setError] = useState('')
@@ -688,4 +693,18 @@ export default function DocumentViewer({ source, zoom, currentPage, inverted, ar
       {textActionPopover && createPortal(textActionPopover, document.body)}
     </div>
   )
+}
+
+function TextDocumentViewer({ source, zoom }: Pick<Props, 'source' | 'zoom'>) {
+  const [content, setContent] = useState('')
+  useEffect(() => {
+    let active = true
+    void source.file.text().then((text) => { if (active) setContent(text) })
+    return () => { active = false }
+  }, [source])
+  return <div className="document-stack text-document-stack" data-page-number={1}><pre style={{ fontSize: `${Math.max(10, 14 * zoom)}px` }}>{content}</pre></div>
+}
+
+export default function DocumentViewer(props: Props) {
+  return props.source.kind === 'text' ? <TextDocumentViewer source={props.source} zoom={props.zoom} /> : <GraphicDocumentViewer {...props} />
 }

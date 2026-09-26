@@ -13,12 +13,12 @@ contextBridge.exposeInMainWorld('readingAssistant', {
   deleteProject: (id) => ipcRenderer.invoke('reading-assistant:delete-project', id),
   deleteProjectFile: (projectId, fileId) => ipcRenderer.invoke('reading-assistant:delete-project-file', projectId, fileId),
   openExternal: (url) => ipcRenderer.invoke('reading-assistant:open-external', url),
-  getQuickOpenEnabled: () => ipcRenderer.invoke('reading-assistant:get-quick-open-enabled'),
-  setQuickOpenEnabled: (enabled) => ipcRenderer.invoke('reading-assistant:set-quick-open-enabled', enabled),
   checkForUpdates: (force = false) => ipcRenderer.invoke('reading-assistant:check-for-updates', force),
   storeSelectionImage: (payload) => ipcRenderer.invoke('reading-assistant:store-selection-image', payload),
-  readSelectionImage: (id) => ipcRenderer.invoke('reading-assistant:read-selection-image', id),
+  readSelectionImage: (id, thumbnail = false) => ipcRenderer.invoke('reading-assistant:read-selection-image', id, thumbnail),
   deleteSelectionImages: (ids) => ipcRenderer.invoke('reading-assistant:delete-selection-images', ids),
+  retainSelectionImages: (items) => ipcRenderer.invoke('reading-assistant:retain-selection-images', items),
+  deleteStoredSelectionImages: (ids) => ipcRenderer.invoke('reading-assistant:delete-stored-selection-images', ids),
   takePendingOpenFiles: () => ipcRenderer.invoke('reading-assistant:take-pending-open-files'),
   onOpenFile: (listener) => {
     const wrapped = (_event, file) => listener(file)

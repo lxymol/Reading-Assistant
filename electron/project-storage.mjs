@@ -19,9 +19,7 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
 
   function writeDataManifest(update = {}) {
     const manifest = { ...readDataManifest(), ...update, schemaVersion: storageSchemaVersion, appVersion, updatedAt: Date.now() }
-    const temporaryPath = `${dataManifestPath}.${process.pid}.${randomUUID()}.tmp`
-    fs.writeFileSync(temporaryPath, JSON.stringify(manifest, null, 2))
-    fs.renameSync(temporaryPath, dataManifestPath)
+    replaceFile(dataManifestPath, JSON.stringify(manifest, null, 2))
     return manifest
   }
 
@@ -40,6 +38,14 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     return directory
   }
 
+  function replaceFile(filePath, content) {
+    const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      fs.writeFileSync(temporaryPath, content)
+      fs.renameSync(temporaryPath, filePath)
+    } finally { fs.rmSync(temporaryPath, { force: true }) }
+  }
+
   function writeJsonAtomically(filePath, value) {
     const content = JSON.stringify(value)
     const digest = createHash('sha256').update(content).digest('hex')
@@ -47,11 +53,7 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     const cached = writtenFiles.get(filePath)
     if (stats && cached?.digest === digest && cached.mtimeMs === stats.mtimeMs && cached.ctimeMs === stats.ctimeMs && cached.size === stats.size) return
     if (!stats || fs.readFileSync(filePath, 'utf8') !== content) {
-      const temporaryPath = filePath + '.' + process.pid + '.' + randomUUID() + '.tmp'
-      try {
-        fs.writeFileSync(temporaryPath, content)
-        fs.renameSync(temporaryPath, filePath)
-      } finally { fs.rmSync(temporaryPath, { force: true }) }
+      replaceFile(filePath, content)
     }
     const next = fs.statSync(filePath)
     writtenFiles.delete(filePath)
@@ -82,7 +84,7 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
       return [{ ...file, paragraphs: Array.isArray(index.paragraphs) ? index.paragraphs : [], indexState: index.indexState || file.indexState, ...((lightweight || indexFileId) ? { indexLoaded } : {}) }]
     })
     const { projectNotes: _projectNotes, projectNoteAssets: _projectNoteAssets, ...withoutLegacyNotes } = project
-    return { ...withoutLegacyNotes, files, ...(lightweight ? { conversations: (project.conversations || []).map((conversation) => ({ ...conversation, history: [] })) } : {}) }
+    return { ...withoutLegacyNotes, files, ...(lightweight ? { conversations: (project.conversations || []).map((conversation) => ({ ...conversation, history: [], historyLoaded: false })) } : {}) }
   }
 
   function listProjectSummaries() {
@@ -107,6 +109,12 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     const directory = projectDataDirectory(payload.id)
     fs.mkdirSync(path.join(directory, 'files'), { recursive: true })
     const { files, projectNotes: _projectNotes, projectNoteAssets: _projectNoteAssets, ...project } = payload
+    const metadataPath = path.join(directory, 'project.json')
+    const previous = project.conversations?.some((conversation) => conversation.historyLoaded === false) && fs.existsSync(metadataPath)
+      ? JSON.parse(fs.readFileSync(metadataPath, 'utf8')) : null
+    const histories = new Map(previous?.conversations?.map((conversation) => [conversation.id, conversation.history]))
+    project.conversations = (project.conversations || []).map(({ historyLoaded, ...conversation }) => historyLoaded === false
+      ? { ...conversation, history: histories.get(conversation.id) || [] } : conversation)
     fs.rmSync(path.join(directory, 'resources'), { recursive: true, force: true })
     for (const value of files) {
       const fileDirectory = projectFileDirectory(payload.id, value.id)
@@ -132,8 +140,10 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
     const directory = projectFileDirectory(payload.projectId, payload.fileId)
     fs.mkdirSync(directory, { recursive: true })
     const sourcePath = path.join(directory, 'source.bin')
-    const temporaryPath = `${sourcePath}.${process.pid}.${randomUUID()}.tmp`
-    fs.writeFileSync(temporaryPath, Buffer.from(payload.data)); fs.renameSync(temporaryPath, sourcePath)
+    const data = ArrayBuffer.isView(payload.data)
+      ? Buffer.from(payload.data.buffer, payload.data.byteOffset, payload.data.byteLength)
+      : Buffer.from(payload.data)
+    replaceFile(sourcePath, data)
     return true
   }
 
@@ -160,6 +170,38 @@ export function createProjectStorage({ projectsDataPath, dataManifestPath, stora
   function deleteProjectRecord(id) { fs.rmSync(projectDataDirectory(id), { recursive: true, force: true }); writeDataManifest() }
   function deleteProjectFile(projectId, fileId) { fs.rmSync(projectFileDirectory(projectId, fileId), { recursive: true, force: true }); writeDataManifest() }
 
+  // Export complete documents one at a time in the storage worker. Neither the
+  // renderer nor the main process needs to keep the combination's indexes alive.
+  function writeAiDocuments(id, fileIds, workdir) {
+    const stored = JSON.parse(fs.readFileSync(path.join(projectDataDirectory(id), 'project.json'), 'utf8'))
+    const selected = Array.isArray(fileIds) && fileIds.length ? [...new Set(fileIds)] : stored.fileOrder
+    if (!selected?.length || selected.some((fileId) => !stored.fileOrder.includes(fileId))) throw new Error('INVALID_DOCUMENT_ATTACHMENT')
+    const directory = path.join(workdir, 'attachments')
+    fs.mkdirSync(directory, { recursive: true })
+    return selected.map((fileId, number) => {
+      const sourceDirectory = projectFileDirectory(id, fileId)
+      const file = JSON.parse(fs.readFileSync(path.join(sourceDirectory, 'file.json'), 'utf8'))
+      const name = `${String(number + 1).padStart(3, '0')}-${String(file.name).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 120)}.txt`
+      const output = path.join(directory, name)
+      if (file.kind === 'text' && fs.existsSync(path.join(sourceDirectory, 'source.bin'))) {
+        fs.copyFileSync(path.join(sourceDirectory, 'source.bin'), output)
+      } else {
+        const indexPath = path.join(sourceDirectory, 'index.json')
+        if (!fs.existsSync(indexPath)) throw new Error(`文档尚未完成文字提取：${file.name}`)
+        if (fs.statSync(indexPath).size > 16 * 1024 * 1024) throw new Error(`文档索引超过单文件内存预算，请拆分后提问：${file.name}`)
+        const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'))
+        if (!index.paragraphs?.some((paragraph) => String(paragraph.text || '').trim())) throw new Error(`文档没有可读文字，需要先进行 OCR：${file.name}`)
+        const descriptor = fs.openSync(output, 'w')
+        try {
+          for (const paragraph of index.paragraphs) fs.writeSync(descriptor, `[Page ${paragraph.page}]\n${paragraph.text}\n\n`)
+        } finally { fs.closeSync(descriptor) }
+      }
+      const textAnnotations = (file.annotations || []).filter((annotation) => annotation.type === 'text' && annotation.text?.trim())
+      for (const annotation of textAnnotations) fs.appendFileSync(output, `\n[User annotation, page ${annotation.page}]\n${annotation.text}\n`)
+      if (!fs.statSync(output).size) throw new Error(`文档没有可读文字：${file.name}`)
+      return { id: fileId, name: file.name, path: output, byteLength: fs.statSync(output).size }
+    })
+  }
 
-  return { initialize: writeDataManifest, readProjectRecord, listProjectSummaries, saveProjectRecord, retrieveStoredProjectContext, getProjectFileSource, saveProjectFileSource, deleteProjectRecord, deleteProjectFile, flush: () => true }
+  return { initialize: writeDataManifest, readProjectRecord, listProjectSummaries, saveProjectRecord, retrieveStoredProjectContext, writeAiDocuments, getProjectFileSource, saveProjectFileSource, deleteProjectRecord, deleteProjectFile, flush: () => true }
 }

@@ -1,5 +1,6 @@
 import type { Project, ProjectSummary, RuntimeProject, RuntimeProjectFile } from '../types'
 import { retrievalService } from './retrievalService'
+import { createIndexedDatabase } from './indexedDatabase.js'
 
 const databaseName = 'raid-projects-v2'
 const projectStore = 'projects'
@@ -18,50 +19,31 @@ const persistedProject = (project: RuntimeProject | Project): Project => {
   }
 }
 
-let databasePromise: Promise<IDBDatabase> | null = null
-
-function openDatabase() {
-  return databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(databaseName, 1)
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(projectStore)) request.result.createObjectStore(projectStore, { keyPath: 'id' })
-      if (!request.result.objectStoreNames.contains(sourceStore)) request.result.createObjectStore(sourceStore)
-    }
-    request.onsuccess = () => {
-      const database = request.result
-      database.onversionchange = () => { database.close(); databasePromise = null }
-      database.onclose = () => { databasePromise = null }
-      resolve(database)
-    }
-    request.onerror = () => { databasePromise = null; reject(request.error || new Error('无法打开项目数据库。')) }
-  })
-}
-
-async function idbRequest<T>(storeName: string, mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>) {
-  const database = await openDatabase()
-  return new Promise<T>((resolve, reject) => {
-    const transaction = database.transaction(storeName, mode)
-    const request = operation(transaction.objectStore(storeName))
-    request.onerror = () => reject(request.error || new Error('项目数据库操作失败。'))
-    transaction.oncomplete = () => resolve(request.result)
-    transaction.onabort = transaction.onerror = () => reject(transaction.error || new Error('项目数据库事务失败。'))
-  })
-}
+const database = createIndexedDatabase(databaseName, { [projectStore]: { keyPath: 'id' }, [sourceStore]: undefined })
+const idbRequest = database.request
 
 const sourceKey = (projectId: string, fileId: string) => `${projectId}:${fileId}`
 
 export class ProjectRepository {
   async list(): Promise<ProjectSummary[]> {
     if (window.readingAssistant) return window.readingAssistant.listProjects()
-    const projects = await idbRequest<Project[]>(projectStore, 'readonly', (store) => store.getAll())
-    return projects.map((project) => ({ id: project.id, name: project.name, fileCount: project.files.length, conversationCount: project.conversations.length, updatedAt: project.updatedAt, activeFileId: project.activeFileId })).sort((a, b) => b.updatedAt - a.updatedAt)
+    return database.transaction<ProjectSummary[]>(projectStore, 'readonly', (transaction, result) => {
+      const summaries: ProjectSummary[] = []
+      const cursor = transaction.objectStore(projectStore).openCursor()
+      cursor.onsuccess = () => {
+        if (!cursor.result) { result(summaries.sort((a, b) => b.updatedAt - a.updatedAt)); return }
+        const project = cursor.result.value as Project
+        summaries.push({ id: project.id, name: project.name, fileCount: project.files.length, conversationCount: project.conversations.length, updatedAt: project.updatedAt, activeFileId: project.activeFileId })
+        cursor.result.continue()
+      }
+    })
   }
 
   async get(id: string, lightweight = false, indexFileId: string | null = null): Promise<Project | null> {
     if (window.readingAssistant) return window.readingAssistant.getProject(id, lightweight, indexFileId)
     const project = await idbRequest<Project | undefined>(projectStore, 'readonly', (store) => store.get(id))
     if (!project) return null
-    return { ...project, files: project.files.map((file) => ({ ...file, paragraphs: !lightweight && (!indexFileId || file.id === indexFileId) ? file.paragraphs : [], indexLoaded: !lightweight && (!indexFileId || file.id === indexFileId) })), ...(lightweight ? { conversations: project.conversations.map((conversation) => ({ ...conversation, history: [] })) } : {}) }
+    return { ...project, files: project.files.map((file) => ({ ...file, paragraphs: !lightweight && (!indexFileId || file.id === indexFileId) ? file.paragraphs : [], indexLoaded: !lightweight && (!indexFileId || file.id === indexFileId) })), ...(lightweight ? { conversations: project.conversations.map((conversation) => ({ ...conversation, history: [], historyLoaded: false })) } : {}) }
   }
 
   async retrieveContext(id: string, query: string, options: { maxCharacters?: number; maxHits?: number }) {
@@ -75,14 +57,22 @@ export class ProjectRepository {
   async save(project: RuntimeProject | Project) {
     const value = persistedProject(project)
     if (window.readingAssistant) return window.readingAssistant.saveProject(value)
-    const existing = await idbRequest<Project | undefined>(projectStore, 'readonly', (store) => store.get(value.id))
-    const merged = { ...value, files: value.files.map((file) => {
-      const runtime = file as RuntimeProjectFile
-      if (runtime.indexLoaded !== false) return file
-      const stored = existing?.files.find((item) => item.id === file.id)
-      return { ...file, paragraphs: stored?.paragraphs || [] }
-    }) }
-    await idbRequest<IDBValidKey>(projectStore, 'readwrite', (store) => store.put(merged))
+    await database.transaction<void>(projectStore, 'readwrite', (transaction) => {
+      const store = transaction.objectStore(projectStore)
+      const request = store.get(value.id)
+      request.onsuccess = () => {
+        const existing = request.result as Project | undefined
+        const storedFiles = new Map(existing?.files.map((file) => [file.id, file]))
+        const storedConversations = new Map(existing?.conversations.map((conversation) => [conversation.id, conversation]))
+        store.put({
+          ...value,
+          files: value.files.map((file) => (file as RuntimeProjectFile).indexLoaded === false
+            ? { ...file, paragraphs: storedFiles.get(file.id)?.paragraphs || [] } : file),
+          conversations: value.conversations.map(({ historyLoaded, ...conversation }) => historyLoaded === false
+            ? { ...conversation, history: storedConversations.get(conversation.id)?.history || [] } : conversation),
+        })
+      }
+    })
     return true
   }
 
@@ -102,18 +92,16 @@ export class ProjectRepository {
 
   async deleteProject(id: string) {
     if (window.readingAssistant) return window.readingAssistant.deleteProject(id)
-    const database = await openDatabase()
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction([projectStore, sourceStore], 'readwrite')
-      const projects = transaction.objectStore(projectStore)
-      const request = projects.get(id)
-      request.onsuccess = () => {
-        const project = request.result as Project | undefined
-        for (const file of project?.files || []) transaction.objectStore(sourceStore).delete(sourceKey(id, file.id))
-        projects.delete(id)
+    await database.transaction<void>([projectStore, sourceStore], 'readwrite', (transaction) => {
+      transaction.objectStore(projectStore).delete(id)
+      // Include orphaned sources left behind by an interrupted import.
+      const prefix = `${id}:`
+      const cursor = transaction.objectStore(sourceStore).openCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'))
+      cursor.onsuccess = () => {
+        if (!cursor.result) return
+        cursor.result.delete()
+        cursor.result.continue()
       }
-      transaction.oncomplete = () => resolve()
-      transaction.onabort = transaction.onerror = () => reject(transaction.error || new Error('项目数据库事务失败。'))
     })
   }
 

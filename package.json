@@ -15,12 +15,14 @@
     "node": ">=20"
   },
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "test:browser": "node tests/browser.test.mjs",
+    "test:memory": "npm run build && node tests/desktop-memory.test.mjs",
+    "test:panels": "npm run build && node tests/desktop-panels.test.mjs",
     "generate:icons": "node scripts/generate-icons.mjs",
     "dev": "concurrently -k \"vite\" \"node --watch server/index.mjs\"",
     "build": "tsc -b && vite build",
@@ -38,7 +40,7 @@
     "asar": true,
     "electronDist": "node_modules/electron/dist",
     "directories": {
-      "output": "release-2.1.0"
+      "output": "release-2.2.0"
     },
     "files": [
       "dist/**/*",

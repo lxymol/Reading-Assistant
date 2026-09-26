@@ -15,6 +15,7 @@ let mainWindow = null
 let exitCacheCleanupStarted = false
 let exitCacheCleanupComplete = false
 const dockZoneWindows = new Map()
+const panelWindows = new Set()
 const panelDragBounds = new WeakMap()
 const panelPreparedBounds = new WeakMap()
 const dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -22,13 +23,16 @@ const appIconPath = path.join(dirname, process.platform === 'win32' ? 'app-icon.
 const dockZoneWidth = 32
 const textFileExtensions = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv', '.tsv', '.tex'])
 const packagedTestMarker = path.join(path.dirname(process.execPath), 'TEST_BUILD')
-const isDevelopmentInstance = process.argv.includes('--development-instance') || (app.isPackaged && fs.existsSync(packagedTestMarker))
+const isMemorySmoke = process.argv.includes('--memory-smoke')
+const isPanelSmoke = process.argv.includes('--panel-smoke')
+const isDesktopSmoke = isMemorySmoke || isPanelSmoke
+const isDevelopmentInstance = isDesktopSmoke || process.argv.includes('--development-instance') || (app.isPackaged && fs.existsSync(packagedTestMarker))
 const applicationDirectory = app.isPackaged ? path.dirname(process.execPath) : path.resolve(dirname, '..')
 const defaultUserDataPath = app.getPath('userData')
 const defaultSessionDataPath = app.getPath('sessionData')
 const raidDataDirectoryName = isDevelopmentInstance ? 'RaidData-test' : 'RaidData'
 const legacyRaidDataPath = path.join(applicationDirectory, raidDataDirectoryName)
-const preferredRaidDataPath = app.isPackaged
+const preferredRaidDataPath = isDesktopSmoke ? path.resolve(process.env.RAID_MEMORY_SMOKE_DIR || path.join(applicationDirectory, 'node_modules', '.tmp', 'raid-memory-smoke')) : app.isPackaged
   ? path.join(path.dirname(applicationDirectory), raidDataDirectoryName)
   : legacyRaidDataPath
 const fallbackRaidDataPath = path.join(defaultUserDataPath, raidDataDirectoryName)
@@ -59,6 +63,7 @@ const sessionDataPath = path.join(runtimeDataPath, 'Chromium')
 const crashDataPath = path.join(cacheDataPath, 'Crashpad')
 const conversionCachePath = path.join(cacheDataPath, 'Conversion')
 const selectionCachePath = path.join(cacheDataPath, 'Selections')
+const selectionArchivePath = path.join(durableDataPath, 'SelectionImages')
 const dataManifestPath = path.join(raidDataPath, 'manifest.json')
 const storageSchemaVersion = 2
 const chromiumDiskCacheLimit = 64 * 1024 * 1024
@@ -67,6 +72,10 @@ const usesSystemDriveFallback = path.resolve(raidDataPath) === path.resolve(fall
 
 // Keep Chromium caches bounded. Durable reader data stays in the external
 // RaidData directory selected above.
+// PDF pages are rendered into 2D canvases. On Windows, Chromium's GPU process
+// retained texture memory after those canvases were released during scrolling.
+// Software compositing keeps the reader's process group within its memory budget.
+if (process.platform === 'win32') app.disableHardwareAcceleration()
 app.commandLine.appendSwitch('disk-cache-size', String(chromiumDiskCacheLimit))
 app.commandLine.appendSwitch('media-cache-size', String(chromiumMediaCacheLimit))
 
@@ -79,7 +88,7 @@ function mergeLegacyData(source, removeAfterMerge = false) {
 }
 
 fs.mkdirSync(raidDataPath, { recursive: true })
-mergeLegacyData(legacyRaidDataPath)
+if (!isDesktopSmoke) mergeLegacyData(legacyRaidDataPath)
 for (const entry of fs.readdirSync(raidDataPath, { withFileTypes: true })) {
   if (entry.isDirectory() && /^UpgradeBackup(?:-\d+)?$/i.test(entry.name)) mergeLegacyData(path.join(raidDataPath, entry.name), true)
 }
@@ -94,7 +103,7 @@ function moveLegacyRuntimeEntry(name, destination = path.join(runtimeDataPath, n
 fs.mkdirSync(runtimeDataPath, { recursive: true })
 moveLegacyRuntimeEntry('Chromium', sessionDataPath)
 moveLegacyRuntimeEntry('Code Cache')
-for (const directory of [raidDataPath, runtimeDataPath, durableDataPath, projectsDataPath, cacheDataPath, sessionDataPath, crashDataPath, conversionCachePath, selectionCachePath]) fs.mkdirSync(directory, { recursive: true })
+for (const directory of [raidDataPath, runtimeDataPath, durableDataPath, projectsDataPath, cacheDataPath, sessionDataPath, crashDataPath, conversionCachePath, selectionCachePath, selectionArchivePath]) fs.mkdirSync(directory, { recursive: true })
 
 function migrateChromiumProfiles(sources) {
   const marker = path.join(sessionDataPath, '.system-profile-migrated-v1')
@@ -120,13 +129,13 @@ function migrateChromiumProfiles(sources) {
 if (!usesSystemDriveFallback) {
   const legacyUserProfile = isDevelopmentInstance ? `${defaultUserDataPath}-test` : defaultUserDataPath
   const legacySessionProfile = isDevelopmentInstance ? `${defaultSessionDataPath}-test` : defaultSessionDataPath
-  migrateChromiumProfiles([...new Set([legacyUserProfile, legacySessionProfile])])
+  if (!isDesktopSmoke) migrateChromiumProfiles([...new Set([legacyUserProfile, legacySessionProfile])])
   app.setPath('userData', sessionDataPath)
   app.setPath('sessionData', sessionDataPath)
 }
 app.setPath('crashDumps', crashDataPath)
 if (process.platform === 'win32') app.setAppUserModelId('cn.lxymol.readingassistant')
-const internalPort = isDevelopmentInstance ? 18788 : 18787
+const internalPort = isPanelSmoke ? 18790 : isMemorySmoke ? 18789 : isDevelopmentInstance ? 18788 : 18787
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (hasSingleInstanceLock) {
   // Selection screenshots are session-only. Remove leftovers after an unclean exit,
@@ -183,21 +192,9 @@ function openFilePayload(filePath) {
   return { name: path.basename(filePath), type, lastModified: stats.mtimeMs, data: new Uint8Array(fs.readFileSync(filePath)) }
 }
 
-async function quickOpenEnabled() {
+async function removeLegacyQuickOpenMenu() {
   if (process.platform !== 'win32') return false
-  try { await execFileAsync('reg.exe', ['QUERY', contextMenuKey]); return true } catch { return false }
-}
-
-async function setQuickOpenEnabled(enabled) {
-  if (process.platform !== 'win32') return false
-  if (!enabled) {
-    try { await execFileAsync('reg.exe', ['DELETE', contextMenuKey, '/f']) } catch { /* Already disabled. */ }
-    return false
-  }
-  await execFileAsync('reg.exe', ['ADD', contextMenuKey, '/ve', '/d', '使用 Raid 打开', '/f'])
-  const command = app.isPackaged ? `"${process.execPath}" "%1"` : `"${process.execPath}" "${applicationDirectory}" "%1"`
-  await execFileAsync('reg.exe', ['ADD', `${contextMenuKey}\\command`, '/ve', '/d', command, '/f'])
-  return true
+  try { await execFileAsync('reg.exe', ['DELETE', contextMenuKey, '/f']) } catch { /* The legacy item may already be absent. */ }
 }
 
 function logStartup(message) {
@@ -402,10 +399,12 @@ async function maintainCachesOnExit() {
   fs.mkdirSync(selectionCachePath, { recursive: true })
 }
 
-const selectionCacheFile = (id) => {
+const selectionImageName = (id) => {
   if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) throw new Error('INVALID_SELECTION_CACHE_ID')
-  return path.join(selectionCachePath, `${id}.jpg`)
+  return `${id}.jpg`
 }
+const selectionCacheFile = (id) => path.join(selectionCachePath, selectionImageName(id))
+const selectionArchiveFile = (id, thumbnail = false) => path.join(selectionArchivePath, thumbnail ? `${id}.thumb.jpg` : selectionImageName(id))
 
 async function storeSelectionImage(payload) {
   if (!payload || payload.data == null || payload.mime !== 'image/jpeg') throw new Error('INVALID_SELECTION_IMAGE')
@@ -416,12 +415,37 @@ async function storeSelectionImage(payload) {
   return { id, byteLength: data.length }
 }
 
-async function readSelectionImage(id) {
-  const filePath = selectionCacheFile(id)
+async function readSelectionImage(id, thumbnail = false) {
+  const archived = selectionArchiveFile(id, thumbnail)
+  const filePath = fs.existsSync(archived) ? archived : thumbnail ? archived : selectionCacheFile(id)
   try { return { data: new Uint8Array(await fs.promises.readFile(filePath)), mime: 'image/jpeg' } } catch (error) {
     if (error?.code === 'ENOENT') return null
     throw error
   }
+}
+
+async function retainSelectionImages(items) {
+  if (!Array.isArray(items)) return false
+  for (const item of items) {
+    const temporary = selectionCacheFile(item?.id)
+    const permanent = selectionArchiveFile(item?.id)
+    if (!fs.existsSync(temporary) && !fs.existsSync(permanent)) throw new Error('选区图像缓存已失效')
+    if (!fs.existsSync(permanent)) {
+      await fs.promises.copyFile(temporary, permanent)
+      await fs.promises.rm(temporary, { force: true })
+    }
+    const preview = String(item?.preview || '')
+    if (/^data:image\/jpeg;base64,/.test(preview)) await fs.promises.writeFile(selectionArchiveFile(item.id, true), Buffer.from(preview.slice(preview.indexOf(',') + 1), 'base64'))
+  }
+  return true
+}
+
+async function deleteStoredSelectionImages(ids) {
+  if (!Array.isArray(ids)) return false
+  await Promise.all(Array.from(new Set(ids)).flatMap((id) => [false, true].map(async (thumbnail) => {
+    await fs.promises.rm(selectionArchiveFile(id, thumbnail), { force: true })
+  })))
+  return true
 }
 
 async function deleteSelectionImages(ids) {
@@ -449,16 +473,18 @@ ipcMain.handle('reading-assistant:open-external', async (_event, value) => {
   await shell.openExternal(url.href)
   return true
 })
-ipcMain.handle('reading-assistant:get-quick-open-enabled', () => quickOpenEnabled())
-ipcMain.handle('reading-assistant:set-quick-open-enabled', (_event, enabled) => setQuickOpenEnabled(Boolean(enabled)))
 ipcMain.handle('reading-assistant:check-for-updates', (_event, force) => checkForUpdates(Boolean(force)))
 ipcMain.handle('reading-assistant:store-selection-image', (_event, payload) => storeSelectionImage(payload))
-ipcMain.handle('reading-assistant:read-selection-image', (_event, id) => readSelectionImage(id))
+ipcMain.handle('reading-assistant:read-selection-image', (_event, id, thumbnail) => readSelectionImage(id, Boolean(thumbnail)))
 ipcMain.handle('reading-assistant:delete-selection-images', (_event, ids) => deleteSelectionImages(ids))
+ipcMain.handle('reading-assistant:retain-selection-images', (_event, items) => retainSelectionImages(items))
+ipcMain.handle('reading-assistant:delete-stored-selection-images', (_event, ids) => deleteStoredSelectionImages(ids))
 ipcMain.handle('reading-assistant:take-pending-open-files', () => pendingOpenPaths.splice(0).flatMap((filePath) => { try { return [openFilePayload(filePath)] } catch { return [] } }))
 const getPanelWindow = (sender) => {
   const panelWindow = BrowserWindow.fromWebContents(sender)
-  return mainWindow && panelWindow && !panelWindow.isDestroyed() && panelWindow.getParentWindow() === mainWindow ? panelWindow : null
+  // Panels are independent native windows so closing them cannot minimize the
+  // reader. Validate their creation here rather than relying on native parenting.
+  return mainWindow && !mainWindow.isDestroyed() && panelWindow && !panelWindow.isDestroyed() && panelWindows.has(panelWindow) ? panelWindow : null
 }
 
 function getDockZoneWindow(side) {
@@ -562,7 +588,7 @@ ipcMain.on('reading-assistant:set-panel-dragging', (event, payload) => {
 ipcMain.on('reading-assistant:set-dock-zones', (event, payload) => {
   const senderWindow = BrowserWindow.fromWebContents(event.sender)
   const trustedSender = senderWindow && mainWindow && !senderWindow.isDestroyed()
-    && (senderWindow === mainWindow || senderWindow.getParentWindow() === mainWindow)
+    && (senderWindow === mainWindow || getPanelWindow(event.sender))
   if (!trustedSender) return
   const active = payload?.active === 'left' || payload?.active === 'right' ? payload.active : null
   setDockZones(Boolean(payload?.visible), active, Boolean(payload?.dark))
@@ -570,7 +596,7 @@ ipcMain.on('reading-assistant:set-dock-zones', (event, payload) => {
 
 async function createWindow() {
   logStartup('Starting local service')
-  const started = await startServer(internalPort)
+  const started = await startServer(internalPort, { documentStorage: projectStorage, selectionImageReader: readSelectionImage })
   localServer = started.server
   logStartup(`Local service ready on ${started.port}`)
 
@@ -588,12 +614,13 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: !isDesktopSmoke,
       preload: path.join(dirname, 'preload.cjs'),
     },
   })
 
   const showMainWindow = () => {
-    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
+    if (isDesktopSmoke || !mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
     mainWindow.show()
     logStartup('Main window shown')
   }
@@ -604,6 +631,8 @@ async function createWindow() {
   mainWindow.setMenu(null)
   mainWindow.setMenuBarVisibility(false)
   mainWindow.on('closed', () => {
+    for (const panelWindow of panelWindows) if (!panelWindow.isDestroyed()) panelWindow.destroy()
+    panelWindows.clear()
     for (const zoneWindow of dockZoneWindows.values()) if (!zoneWindow.isDestroyed()) zoneWindow.destroy()
     dockZoneWindows.clear()
     mainWindow = null
@@ -614,19 +643,33 @@ async function createWindow() {
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
-          parent: mainWindow,
           modal: false,
           frame: false,
           autoHideMenuBar: true,
           minWidth: 260,
           minHeight: 220,
           backgroundColor: '#252526',
-          webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(dirname, 'preload.cjs') },
+          ...(isDesktopSmoke ? { show: false } : {}),
+          webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !isDesktopSmoke, preload: path.join(dirname, 'preload.cjs') },
         },
       }
     }
     void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  mainWindow.webContents.on('did-create-window', (panelWindow) => {
+    panelWindows.add(panelWindow)
+    let mainWasMinimized = false
+    panelWindow.on('close', () => { mainWasMinimized = Boolean(mainWindow?.isMinimized()) })
+    panelWindow.on('closed', () => {
+      if (panelDragBounds.has(panelWindow)) setDockZones(false)
+      panelWindows.delete(panelWindow)
+      panelDragBounds.delete(panelWindow)
+      panelPreparedBounds.delete(panelWindow)
+      setImmediate(() => {
+        if (!mainWasMinimized && mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()) mainWindow.restore()
+      })
+    })
   })
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const localOrigin = `http://127.0.0.1:${started.port}`
@@ -637,10 +680,65 @@ async function createWindow() {
   })
   await mainWindow.loadURL(`http://127.0.0.1:${started.port}`)
   showMainWindow()
+  if (isPanelSmoke) return
+  if (isMemorySmoke) {
+    void runMemorySmoke(mainWindow)
+    return
+  }
   const importBridgeReady = await mainWindow.webContents.executeJavaScript("Boolean(window.readingAssistant?.selectSkillFolder && window.readingAssistant?.selectLanguageFolder && window.readingAssistant?.movePanelWindow)")
   logStartup(`Folder import bridge ready: ${importBridgeReady}`)
   console.log(`Raid folder import bridge: ${importBridgeReady ? 'ready' : 'unavailable'}`)
   logStartup('Reader interface loaded')
+}
+
+async function runMemorySmoke(window) {
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const { codexAppServer } = await import('../server/codex-app-server.mjs')
+  const sample = async (phase) => {
+    const processes = app.getAppMetrics().map((metric) => ({ type: metric.type, serviceName: metric.serviceName, mb: Math.round((metric.memory?.workingSetSize || 0) / 1024), privateMb: Math.round((metric.memory?.privateBytes || 0) / 1024) }))
+    let codexMb = 0
+    let codexPrivateMb = 0
+    const codexPid = codexAppServer.process?.pid
+    if (codexPid && process.platform === 'win32') {
+      try {
+        const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `$p = Get-Process -Id ${Number(codexPid)}; "$($p.WorkingSet64),$($p.PrivateMemorySize64)"`], { windowsHide: true })
+        const [workingSet, privateBytes] = stdout.trim().split(',').map(Number)
+        codexMb = Math.round(workingSet / (1024 * 1024)) || 0
+        codexPrivateMb = Math.round(privateBytes / (1024 * 1024)) || 0
+      } catch { /* The child may have exited between samples. */ }
+    }
+    const totalMb = processes.reduce((sum, metric) => sum + metric.mb, codexMb)
+    const totalPrivateMb = processes.reduce((sum, metric) => sum + metric.privateMb, codexPrivateMb)
+    console.log(`RAID_MEMORY_METRIC ${JSON.stringify({ phase, totalMb, totalPrivateMb, codexMb, codexPrivateMb, processes })}`)
+  }
+  try {
+    let ready = false
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      ready = await window.webContents.executeJavaScript("document.querySelectorAll('.lazy-pdf-page').length >= 120")
+      if (ready) break
+      await delay(250)
+    }
+    if (!ready) throw new Error('120-page PDF did not open')
+    await delay(1500)
+    await sample('opened')
+    for (let cycle = 1; cycle <= 6; cycle += 1) {
+      for (let step = 0; step < 60; step += 1) {
+        await window.webContents.executeJavaScript(`(() => { const reader = document.querySelector('.reader-scroll'); const pages = document.querySelectorAll('.lazy-pdf-page'); if (reader && pages.length) reader.scrollTop = pages[${step * 2}].offsetTop })()`)
+        await delay(80)
+      }
+      await delay(1200)
+      await sample(`scroll-${cycle}`)
+    }
+    await codexAppServer.status()
+    await delay(1200)
+    await sample('codex-running')
+    codexAppServer.stop()
+    await delay(800)
+    await sample('codex-stopped')
+  } catch (error) {
+    console.error(`RAID_MEMORY_ERROR ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  } finally { app.quit() }
 }
 
 if (!hasSingleInstanceLock) {
@@ -660,6 +758,7 @@ if (!hasSingleInstanceLock) {
   })
   app.whenReady().then(() => {
     logStartup('Electron ready')
+    if (!isDesktopSmoke) void removeLegacyQuickOpenMenu()
     return createWindow()
   }).catch((error) => {
     logStartup(`Startup failed: ${error instanceof Error ? error.stack || error.message : String(error)}`)

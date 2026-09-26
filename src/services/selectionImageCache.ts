@@ -1,4 +1,50 @@
 import type { CapturedSelection, SelectionImage } from '../types'
+import { createIndexedDatabase } from './indexedDatabase.js'
+
+const archive = createIndexedDatabase('raid-selection-images-v1', { images: undefined })
+type ArchivedImage = { full: Blob; thumbnail: Blob }
+const archiveImage = (id: string, value: ArchivedImage) => archive.request('images', 'readwrite', (store) => store.put(value, id))
+const archivedImage = async (id: string) => await archive.request<ArchivedImage | undefined>('images', 'readonly', (store) => store.get(id)) || null
+
+export async function retainSelectionImages(selections: CapturedSelection[]) {
+  const attachments: Array<{ id: string; page: number }> = []
+  const nativeItems: Array<{ id: string; preview: string }> = []
+  for (const selection of selections) for (const [index, image] of selection.images.entries()) {
+    const page = selection.regions[index]?.page || selection.page
+    if (image.cacheId && window.readingAssistant?.retainSelectionImages) {
+      nativeItems.push({ id: image.cacheId, preview: image.preview })
+      attachments.push({ id: image.cacheId, page })
+    } else {
+      const id = crypto.randomUUID()
+      const full = await fetch(await resolveSelectionImage(image)).then((response) => response.blob())
+      const thumbnail = image.preview ? await fetch(image.preview).then((response) => response.blob()) : full
+      await archiveImage(id, { full, thumbnail })
+      attachments.push({ id, page })
+    }
+  }
+  if (nativeItems.length) await window.readingAssistant!.retainSelectionImages!(nativeItems)
+  return attachments
+}
+
+export async function loadStoredSelectionImage(id: string, thumbnail = false): Promise<Blob> {
+  if (window.readingAssistant?.readSelectionImage) {
+    const value = await window.readingAssistant.readSelectionImage(id, thumbnail)
+    if (!value) throw new Error('选区图片已被删除')
+    return new Blob([value.data as BlobPart], { type: value.mime })
+  }
+  const value = await archivedImage(id)
+  if (!value) throw new Error('选区图片已被删除')
+  return thumbnail ? value.thumbnail : value.full
+}
+
+export async function deleteStoredSelectionImages(ids: string[]) {
+  const unique = [...new Set(ids)]
+  if (!unique.length) return
+  if (window.readingAssistant?.deleteStoredSelectionImages) { await window.readingAssistant.deleteStoredSelectionImages(unique); return }
+  await archive.transaction<void>('images', 'readwrite', (transaction) => {
+    for (const id of unique) transaction.objectStore('images').delete(id)
+  })
+}
 
 const canvasBlob = (canvas: HTMLCanvasElement, quality: number) => new Promise<Blob>((resolve, reject) => {
   canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('无法编码选区图像')), 'image/jpeg', quality)

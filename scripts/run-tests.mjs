@@ -18,5 +18,5 @@ const compiler = spawnSync(process.execPath, [path.join(root, 'node_modules', 't
 if (compiler.status !== 0) process.exit(compiler.status || 1)
 
 const testFile = path.join(output, 'tests', 'core.test.js')
-const runner = spawnSync(process.execPath, ['--test', testFile, path.join(root, 'tests', 'storage.test.mjs')], { cwd: root, stdio: 'inherit' })
+const runner = spawnSync(process.execPath, ['--test', testFile, ...['storage', 'codex-app-server', 'chat-input', 'ai-route'].map((name) => path.join(root, 'tests', `${name}.test.mjs`))], { cwd: root, stdio: 'inherit' })
 process.exit(runner.status || 0)

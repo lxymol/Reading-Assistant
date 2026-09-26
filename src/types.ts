@@ -2,7 +2,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 
 export type NormalizedRegion = { left: number; top: number; width: number; height: number }
 
-export type SourceFile = { name: string; kind: 'pdf' | 'image'; url: string; file: File }
+export type SourceFile = { name: string; kind: 'pdf' | 'image' | 'text'; url: string; file: File }
 export type SelectionImage = { preview: string; cacheId?: string; dataUrl?: string; byteLength?: number }
 export type SelectionResult = { image: string; images: SelectionImage[]; page: number; regions: Array<{ page: number; region: NormalizedRegion }>; annotationTexts?: string[] }
 
@@ -19,13 +19,14 @@ export type ChatReference = {
 export type ChatMessage = {
   id: string; role: 'user' | 'assistant'; content: string; contextMode?: 'selection' | 'document' | 'combination' | 'project'
   label?: string; prompt?: string; sourcePage?: number; references?: ChatReference[]; citationsDisabled?: boolean
+  attachments?: Array<{ id: string; page: number }>
 }
 
 export type AiConfig = {
   provider: 'api' | 'codex'; apiKey: string; baseUrl: string; model: string
   visionEnabled: boolean; visionApiKey: string; visionBaseUrl: string; visionModel: string
   reasoningEnabled: boolean; reasoningApiKey: string; reasoningBaseUrl: string; reasoningModel: string
-  codexModel: string; codexReasoningModel: string; codexAgentEnabled: boolean
+  codexModel: string; codexReasoningModel: string
 }
 
 export type ImportedSkill = { id: string; name: string; command: string; description: string; instructions: string; sourcePath: string }
@@ -46,15 +47,19 @@ export type AiAction = 'translate' | 'explain' | 'insight' | 'summarize' | 'cust
 export type CapturedSelection = SelectionResult & { id: string; text: string; textParts: string[]; loading: boolean }
 export type Conversation = {
   id: string; title: string; history: ChatMessage[]
+  historyLoaded?: boolean
   ownerType?: 'file' | 'combination'; fileId?: string
   contextScope?: 'file' | 'combination'
+  codexThreadId?: string
+  codexThreadVersion?: number
+  documentFileIds?: string[]
 }
 
 export type ReadingState = { page: number; zoom: number; scrollTop: number; region?: NormalizedRegion }
 export type IndexState = { status: 'pending' | 'indexing' | 'ready' | 'error'; version: number; indexedAt?: number; error?: string }
 
 export type ProjectFile = {
-  id: string; projectId: string; name: string; kind: 'pdf' | 'image'; type: string; size: number; lastModified: number
+  id: string; projectId: string; name: string; kind: 'pdf' | 'image' | 'text'; type: string; size: number; lastModified: number
   createdAt: number; updatedAt: number; readingState: ReadingState; highlights: DocumentHighlight[]
   annotations: DocumentAnnotation[]; paragraphs: DocumentParagraph[]; indexState: IndexState
 }
@@ -99,12 +104,12 @@ declare global {
       preparePanelDrag: () => void
       setPanelDragging: (active: boolean) => void
       setDockZones: (visible: boolean, active: 'left' | 'right' | null, dark?: boolean) => void
-      getQuickOpenEnabled: () => Promise<boolean>
-      setQuickOpenEnabled: (enabled: boolean) => Promise<boolean>
       checkForUpdates: (force?: boolean) => Promise<AppUpdateInfo>
       storeSelectionImage: (payload: { data: ArrayBuffer; mime: string }) => Promise<{ id: string; byteLength: number }>
-      readSelectionImage: (id: string) => Promise<{ data: Uint8Array; mime: string } | null>
+      readSelectionImage: (id: string, thumbnail?: boolean) => Promise<{ data: Uint8Array; mime: string } | null>
       deleteSelectionImages: (ids: string[]) => Promise<boolean>
+      retainSelectionImages: (items: Array<{ id: string; preview: string }>) => Promise<boolean>
+      deleteStoredSelectionImages: (ids: string[]) => Promise<boolean>
       takePendingOpenFiles: () => Promise<Array<{ name: string; type: string; lastModified: number; data: Uint8Array }>>
       onOpenFile: (listener: (file: { name: string; type: string; lastModified: number; data: Uint8Array }) => void) => () => void
     }

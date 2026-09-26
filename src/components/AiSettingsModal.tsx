@@ -15,7 +15,6 @@ type Props = {
   languages: LanguagePack[]
   memorySettings: MemorySettings
   userMemory: string
-  quickOpenEnabled: boolean
   shortcutSettings: ShortcutSettings
   onClose: () => void
   onSave: (config: AiConfig) => void
@@ -25,11 +24,10 @@ type Props = {
   onLanguageChange: (language: AppLanguage) => void
   onMemorySettingsChange: (settings: MemorySettings) => void
   onUserMemoryChange: (memory: string) => void
-  onQuickOpenChange: (enabled: boolean) => Promise<void> | void
   onShortcutSettingsChange: (settings: ShortcutSettings) => void
 }
 
-export default function AiSettingsModal({ value, serverConfigured, skills, language, languages, memorySettings, userMemory, quickOpenEnabled, shortcutSettings, onClose, onSave, onImportSkill, onRemoveSkill, onImportLanguage, onLanguageChange, onMemorySettingsChange, onUserMemoryChange, onQuickOpenChange, onShortcutSettingsChange }: Props) {
+export default function AiSettingsModal({ value, serverConfigured, skills, language, languages, memorySettings, userMemory, shortcutSettings, onClose, onSave, onImportSkill, onRemoveSkill, onImportLanguage, onLanguageChange, onMemorySettingsChange, onUserMemoryChange, onShortcutSettingsChange }: Props) {
   const { t, pack } = useI18n()
   const [tab, setTab] = useState<SettingsTab>('models')
   const [draft, setDraft] = useState(value)
@@ -56,7 +54,7 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
       if (!window.readingAssistant?.checkForUpdates) throw new Error('Desktop update check unavailable')
       setUpdateInfo(await window.readingAssistant.checkForUpdates(force))
     } catch {
-      setUpdateInfo({ currentVersion: '2.1.0', author: 'xyLee', repositoryUrl: 'https://github.com/lxymol/Reading-Assistant', releaseUrl: 'https://github.com/lxymol/Reading-Assistant/releases/latest', updateAvailable: false, checkedAt: Date.now(), error: 'UPDATE_CHECK_FAILED' })
+      setUpdateInfo({ currentVersion: '2.2.0', author: 'xyLee', repositoryUrl: 'https://github.com/lxymol/Reading-Assistant', releaseUrl: 'https://github.com/lxymol/Reading-Assistant/releases/latest', updateAvailable: false, checkedAt: Date.now(), error: 'UPDATE_CHECK_FAILED' })
     } finally {
       setCheckingUpdate(false)
     }
@@ -192,8 +190,6 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
   const save = () => {
     if (draft.provider === 'codex') {
       if (!codexStatus.loggedIn) return setMessage({ type: 'error', text: pack.code === 'en-US' ? 'Sign in to Codex on this computer first.' : '请先在这台电脑上登录 Codex。' })
-      if (!draft.codexModel.trim()) return setMessage({ type: 'error', text: pack.code === 'en-US' ? 'Choose a default Codex model.' : '请选择 Codex 默认模型。' })
-      if (draft.reasoningEnabled && !draft.codexReasoningModel.trim()) return setMessage({ type: 'error', text: pack.code === 'en-US' ? 'Choose a Codex thinking model.' : '请选择 Codex 深度思考模型。' })
       onSave({ ...draft, provider: 'codex', codexModel: draft.codexModel.trim(), codexReasoningModel: draft.codexReasoningModel.trim() })
       onClose()
       return
@@ -208,7 +204,6 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
       visionEnabled: draft.visionEnabled, visionApiKey: draft.visionApiKey.trim(), visionBaseUrl: draft.visionBaseUrl.trim().replace(/\/$/, ''), visionModel: draft.visionModel.trim(),
       reasoningEnabled: draft.reasoningEnabled, reasoningApiKey: draft.reasoningApiKey.trim(), reasoningBaseUrl: draft.reasoningBaseUrl.trim().replace(/\/$/, ''), reasoningModel: draft.reasoningModel.trim(),
       codexModel: draft.codexModel.trim(), codexReasoningModel: draft.codexReasoningModel.trim(),
-      codexAgentEnabled: draft.codexAgentEnabled,
     })
     onClose()
   }
@@ -250,8 +245,7 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
               <div><strong>{pack.code === 'en-US' ? 'Codex account' : 'Codex 账户'}</strong><small>{codexStatus.loading ? (pack.code === 'en-US' ? 'Checking…' : '正在检查…') : codexStatus.loggedIn ? `${codexStatus.email || (pack.code === 'en-US' ? 'Signed in' : '已登录')}${codexStatus.planType ? ` · ${codexStatus.planType}` : ''}` : codexStatus.accountType === 'apiKey' ? (pack.code === 'en-US' ? 'Codex is using an API key. Sign in with ChatGPT for subscription access.' : 'Codex 当前使用 API Key；如需订阅额度，请改用 ChatGPT 账户登录。') : (codexStatus.error || (pack.code === 'en-US' ? 'No reusable Codex account was found.' : '没有检测到可复用的 Codex 账户。'))}</small></div>
               <button type="button" onClick={() => codexStatus.loggedIn ? void refreshCodexStatus() : void startCodexLogin()} disabled={codexStatus.loading || startingCodexLogin}>{codexStatus.loading || startingCodexLogin ? <LoaderCircle className="spin" size={14} /> : codexStatus.loggedIn ? (pack.code === 'en-US' ? 'Refresh' : '刷新') : (pack.code === 'en-US' ? 'Sign in' : '登录')}</button>
             </section>
-            <label className="field-label codex-primary-model-label">{pack.code === 'en-US' ? 'Default model name' : '默认模型名称'}</label>{modelPicker('default', 'codexModel', 'gpt-…')}
-            <section className="vision-config"><label className="vision-toggle"><input type="checkbox" checked={draft.codexAgentEnabled} onChange={(event) => setDraft({ ...draft, codexAgentEnabled: event.target.checked })} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Restricted agent mode' : '受限 Agent 模式'}</strong><small>{pack.code === 'en-US' ? 'Can plan and use Raid-approved reading, time, and web-search tools. No terminal, file writes, or computer control.' : '可拆分任务并调用 Raid 白名单中的阅读、时间与联网搜索工具；不开放终端、文件写入或电脑控制。'}</small></span></label></section>
+            <label className="field-label codex-primary-model-label">{pack.code === 'en-US' ? 'Model (blank follows Codex)' : '模型（留空跟随 Codex 默认）'}</label>{modelPicker('default', 'codexModel', 'gpt-…')}
             <section className="vision-config"><label className="vision-toggle"><input type="checkbox" checked={draft.reasoningEnabled} onChange={(event) => setDraft({ ...draft, reasoningEnabled: event.target.checked })} /><span className="vision-switch" aria-hidden="true" /><span><strong>{t('enableDeepThinking')}</strong></span></label>{draft.reasoningEnabled && <div className="vision-fields">
               <label className="field-label">{t('reasoningModel')}</label>{modelPicker('reasoning', 'codexReasoningModel', 'gpt-…')}
             </div>}</section>
@@ -275,7 +269,7 @@ export default function AiSettingsModal({ value, serverConfigured, skills, langu
         </section><section className="memory-card shortcut-settings"><div className="shortcut-heading"><h3>{pack.code === 'en-US' ? 'Shortcuts' : '快捷键'}</h3><small>{pack.code === 'en-US' ? 'Click a field, then press a key combination or mouse button.' : '点击输入框后，按下组合键或鼠标按键。'}</small></div>{(['projects', 'tags', 'chat', 'annotation'] as ShortcutAction[]).map((action) => {
           const labels: Record<ShortcutAction, string> = { projects: pack.code === 'en-US' ? 'Files' : '文件', tags: pack.code === 'en-US' ? 'Tags' : '标签', chat: pack.code === 'en-US' ? 'Chat' : '对话', annotation: pack.code === 'en-US' ? 'Annotation' : '批注' }
           return <label className="shortcut-row" key={action}><span>{labels[action]}</span><input readOnly value={recordingShortcut === action ? (pack.code === 'en-US' ? 'Press shortcut…' : '请按快捷键…') : shortcutSettings[action]} placeholder={pack.code === 'en-US' ? 'Not set' : '未设置'} onFocus={() => setRecordingShortcut(action)} onKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (event.key === 'Escape') return setRecordingShortcut(null); const shortcut = shortcutFromKeyboardEvent(event); if (shortcut) { updateShortcut(action, shortcut); setRecordingShortcut(null); event.currentTarget.blur() } }} onMouseDown={(event) => { if (recordingShortcut !== action || event.button === 0) return; event.preventDefault(); event.stopPropagation(); updateShortcut(action, shortcutFromMouseEvent(event)); setRecordingShortcut(null); event.currentTarget.blur() }} onContextMenu={(event) => event.preventDefault()} /><button type="button" onClick={() => { updateShortcut(action, ''); setRecordingShortcut(null) }}>{pack.code === 'en-US' ? 'Clear' : '清除'}</button></label>
-        })}</section><section className="memory-card quick-open-card"><label className="vision-toggle"><input type="checkbox" checked={quickOpenEnabled} disabled={!window.readingAssistant} onChange={(event) => void onQuickOpenChange(event.target.checked)} /><span className="vision-switch" aria-hidden="true" /><span><strong>{pack.code === 'en-US' ? 'Open with Raid' : '右键使用 Raid 打开'}</strong><small>{pack.code === 'en-US' ? 'Adds an “Open with Raid” item to the Windows file context menu.' : '在 Windows 文件右键菜单中添加“使用 Raid 打开”。卸载时会自动清理。'}</small></span></label></section>
+        })}</section>
           <section className="memory-card app-info-card">
             <div className="app-info-heading"><h3>{pack.code === 'en-US' ? 'Raid version' : 'Raid 版本'}</h3><button className="update-refresh" type="button" disabled={checkingUpdate} onClick={() => void checkForUpdates(true)} title={pack.code === 'en-US' ? 'Check again' : '重新检查'}>{checkingUpdate ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}</button></div>
             <div className="version-grid"><span>{pack.code === 'en-US' ? 'Current version' : '当前版本'}</span><strong>{updateInfo ? `v${updateInfo.currentVersion}` : '—'}</strong><span>{pack.code === 'en-US' ? 'Latest version' : '最新版本'}</span><strong>{checkingUpdate && !updateInfo ? (pack.code === 'en-US' ? 'Checking…' : '检查中…') : updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : (pack.code === 'en-US' ? 'Unavailable' : '暂时无法获取')}</strong></div>
