@@ -83,7 +83,7 @@ export type ReaderLocation = { projectId: string; fileId: string; page: number; 
 
 export type PanelId = 'projects' | 'selection' | 'chat' | 'tags'
 export type PanelDock = 'left' | 'right' | 'float'
-export type PanelLayout = { open: boolean; dock: PanelDock; x: number; y: number; width: number; height: number; dockSize: number; z: number }
+export type PanelLayout = { open: boolean; dock: PanelDock; x: number; y: number; width: number; height: number; dockSize: number; z: number; alwaysOnTop?: boolean }
 
 declare global {
   interface Window {
@@ -101,10 +101,12 @@ declare global {
       deleteProjectFile: (projectId: string, fileId: string) => Promise<void>
       openExternal: (url: string) => Promise<boolean>
       movePanelWindow: (id: string, x: number, y: number) => void
+      setPanelOnTop: (active: boolean) => Promise<boolean>
       preparePanelDrag: () => void
       setPanelDragging: (active: boolean) => void
       setDockZones: (visible: boolean, active: 'left' | 'right' | null, dark?: boolean) => void
       checkForUpdates: (force?: boolean) => Promise<AppUpdateInfo>
+      storeGeneratedImage: (payload: { data: ArrayBuffer; thumbnail: ArrayBuffer }) => Promise<{ id: string }>
       storeSelectionImage: (payload: { data: ArrayBuffer; mime: string }) => Promise<{ id: string; byteLength: number }>
       readSelectionImage: (id: string, thumbnail?: boolean) => Promise<{ data: Uint8Array; mime: string } | null>
       deleteSelectionImages: (ids: string[]) => Promise<boolean>

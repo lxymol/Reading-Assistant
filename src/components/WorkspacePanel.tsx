@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Pin, PinOff, X } from 'lucide-react'
 import type { PanelLayout } from '../types'
 
 type Props = {
@@ -61,6 +61,7 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
     root.id = 'panel-window-root'
     popup.document.body.replaceChildren(root)
     setPortalTarget(root)
+    void popup.readingAssistant?.setPanelOnTop(Boolean(current.alwaysOnTop))
     popup.focus()
     const readyForGeometryAt = performance.now() + 350
 
@@ -215,7 +216,10 @@ export default function WorkspacePanel({ id, title, icon, layout, onChange, onFo
 
   const panel = <aside ref={frameRef} className={`workspace-panel panel-${id} dock-${layout.dock}`} onPointerDownCapture={onFocus} style={layout.dock === 'float' && portalTarget === document.body ? { left: layout.x, top: layout.y, width: layout.width, height: layout.height, zIndex: layout.z } : layout.dock !== 'float' ? { flexGrow: layout.dockSize } : undefined}>
     <header className="workspace-panel-header" onPointerEnter={() => popupRef.current?.readingAssistant?.preparePanelDrag()} onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation() }} onPointerDown={startMove} onPointerMove={move} onPointerUp={(event) => stopMove(event)} onPointerCancel={(event) => stopMove(event, false)}>
-      <span>{icon}<strong>{title}</strong></span><div>{actions}{layout.dock === 'float' && <><button onClick={() => onChange({ ...layout, dock: 'left' })} title="停靠到左侧"><ChevronLeft size={15} /></button><button onClick={() => onChange({ ...layout, dock: 'right' })} title="停靠到右侧"><ChevronRight size={15} /></button></>}<button onClick={() => onChange({ ...layout, open: false })} title="关闭"><X size={15} /></button></div>
+      <span>{icon}<strong>{title}</strong></span><div>{actions}{layout.dock === 'float' && <><button aria-pressed={Boolean(layout.alwaysOnTop)} title={layout.alwaysOnTop ? '取消置顶' : '置顶'} onClick={async () => {
+        const pinned = await popupRef.current?.readingAssistant?.setPanelOnTop(!layout.alwaysOnTop)
+        if (pinned !== undefined) onChange({ ...layoutRef.current, alwaysOnTop: pinned })
+      }}>{layout.alwaysOnTop ? <PinOff size={15} /> : <Pin size={15} />}</button><button onClick={() => onChange({ ...layout, dock: 'left' })} title="停靠到左侧"><ChevronLeft size={15} /></button><button onClick={() => onChange({ ...layout, dock: 'right' })} title="停靠到右侧"><ChevronRight size={15} /></button></>}<button onClick={() => onChange({ ...layout, open: false })} title="关闭"><X size={15} /></button></div>
     </header>
     <div className="workspace-panel-content">{children}</div>
   </aside>

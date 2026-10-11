@@ -5,6 +5,7 @@ import {
   Eraser, Lightbulb, LoaderCircle, MessageSquareText, Minus, Palette, PenLine,
   Plus, Puzzle, Send, Sparkles, MousePointer2, TextCursorInput, Type, Undo2, X, Square, Tag,
 } from 'lucide-react'
+import { retainGeneratedImages } from './services/selectionImageCache'
 import { readAiStream, readConversationStream, recentSelectionHistory } from './services/aiResponse'
 import ActivityBar from './components/ActivityBar'
 import ProjectExplorer from './components/ProjectExplorer'
@@ -1289,6 +1290,10 @@ export default function App({ onLanguageChange }: { onLanguageChange: (language:
           updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, content: event.content, label: event.skillName ? `${t('skillUsed')} · ${event.skillName}` : undefined, references: targetUsesContext && !targetIsProject && Array.isArray(event.references) ? event.references : undefined } : message) }))
         }
       })
+      if (done.images?.length) {
+        const images = await retainGeneratedImages(done.images)
+        updateConversationRoute(workspaceId, conversationId, (conversation) => ({ ...conversation, history: conversation.history.map((message) => message.id === assistantId ? { ...message, attachments: images } : message) }))
+      }
       if (done.files?.length) await addGeneratedTextFiles(workspaceId, done.files)
       learnUserMemory(effectiveInstruction || actionLabel, done.content)
     } catch (reason) {

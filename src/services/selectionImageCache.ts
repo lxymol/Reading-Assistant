@@ -101,3 +101,34 @@ export function boundSelectionPreviews(selections: CapturedSelection[], maximumP
   }
   return bounded
 }
+
+// Preserve generated images and transparency across app restarts.
+export async function retainGeneratedImages(images: Array<{ name: string; dataUrl: string }>) {
+  const attachments: Array<{ id: string; page: number }> = []
+  for (const image of images) {
+    if (!/^data:image\/(png|jpeg|webp);base64,/.test(image.dataUrl)) throw new Error('生成图片格式无效')
+    const full = await (await fetch(image.dataUrl)).blob()
+    const bitmap = await createImageBitmap(full)
+    const canvas = document.createElement('canvas')
+    try {
+      if (bitmap.width * bitmap.height > 40_000_000) throw new Error('生成图片尺寸超过保存预算')
+      const scale = Math.min(1, 480 / Math.max(bitmap.width, bitmap.height))
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+      canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+      const thumbnail = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('无法保存生成图片')), 'image/png'))
+      const png = full.type === 'image/png' ? full : await new Promise<Blob>((resolve, reject) => {
+        const original = document.createElement('canvas')
+        original.width = bitmap.width; original.height = bitmap.height
+        original.getContext('2d')?.drawImage(bitmap, 0, 0)
+        original.toBlob((blob) => { original.width = 0; original.height = 0; if (blob) resolve(blob); else reject(new Error('无法保存生成图片')) }, 'image/png')
+      })
+      const id = window.readingAssistant?.storeGeneratedImage
+        ? (await window.readingAssistant.storeGeneratedImage({ data: await png.arrayBuffer(), thumbnail: await thumbnail.arrayBuffer() })).id
+        : `generated-${crypto.randomUUID()}`
+      if (!window.readingAssistant?.storeGeneratedImage) await archiveImage(id, { full: png, thumbnail })
+      attachments.push({ id, page: 0 })
+    } finally { bitmap.close(); canvas.width = 0; canvas.height = 0 }
+  }
+  return attachments
+}

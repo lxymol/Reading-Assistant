@@ -251,8 +251,7 @@ app.post('/api/ai', async (req, res) => {
   const hasTextInput = Boolean(String(selectedText).trim() || String(documentText).trim() || hasDocumentSource)
   const useReasoning = reasoningRequested
   const safeHistory = Array.isArray(history) ? history.slice(-40).filter((item) => item && ['user', 'assistant'].includes(item.role)) : []
-  const hasHistoryImages = Boolean(desktopSelectionImageReader && safeHistory.some((item) => item.role === 'user' && Array.isArray(item.attachmentIds) && item.attachmentIds.length))
-  const useVision = Boolean(selectionImages.length || hasHistoryImages)
+  const useVision = Boolean(selectionImages.length)
   const emptySelectionChat = contextMode === 'selection' && action === 'custom' && Boolean(String(instruction).trim()) && !hasTextInput && !useVision
   if (!hasTextInput && !useVision && !emptySelectionChat) return res.status(400).json({ error: '没有可供处理的内容。空选区时可以在输入框中直接进行普通对话。' })
 
@@ -276,28 +275,6 @@ app.post('/api/ai', async (req, res) => {
       userPrompt = `${activeSkill.instructions}\n\n${userPrompt}`
     }
     const prepareDocuments = hasDocumentSource ? (workdir) => desktopDocumentStorage.call('writeAiDocuments', req.body.documentSource.projectId, req.body.documentSource.fileIds, workdir) : undefined
-    const prepareHistoryImages = async () => {
-      const loaded = new Map()
-      let count = selectionImages.length
-      let bytes = selectionImages.reduce((sum, image) => sum + image.length, 0)
-      if (!desktopSelectionImageReader) return loaded
-      for (const message of [...safeHistory].reverse()) {
-        if (message.role !== 'user' || !Array.isArray(message.attachmentIds)) continue
-        for (const id of message.attachmentIds) {
-          if (count >= 8 || loaded.has(id)) continue
-          requestController.signal.throwIfAborted()
-          const image = await desktopSelectionImageReader(id, false).catch(() => null)
-          if (!image) continue
-          const encodedLength = Math.ceil(image.data.byteLength / 3) * 4 + 23
-          if (bytes + encodedLength > 16 * 1024 * 1024) continue
-          const url = `data:${image.mime || 'image/jpeg'};base64,${Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString('base64')}`
-          loaded.set(id, url)
-          bytes += encodedLength
-          count += 1
-        }
-      }
-      return loaded
-    }
     if (provider === 'api' && prepareDocuments) {
       const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'raid-api-documents-'))
       try {
@@ -329,6 +306,7 @@ app.post('/api/ai', async (req, res) => {
     let content
     let model
     let generatedFiles = []
+    let generatedImages = []
     if (provider === 'codex') {
       model = codexConfig.model
       const historyPrompt = safeHistory.length ? `\n\n【最近对话】\n${safeHistory.map((item) => `${item.role === 'user' ? '用户' : '助手'}：${stripCitationTags(String(item.content))}${Array.isArray(item.attachmentIds) && item.attachmentIds.length ? '\n[Image attachments: ' + item.attachmentIds.join(', ') + ']' : ''}`).join('\n\n')}` : ''
@@ -337,7 +315,6 @@ app.post('/api/ai', async (req, res) => {
         prompt: userPrompt,
         instructions: systemPrompt,
         prepareDocuments,
-        prepareHistoryImages,
         initialContext: historyPrompt,
         threadId: fastInlineTranslation ? '' : String(req.body?.codexThreadId || ''),
         persistThread: !fastInlineTranslation,
@@ -351,14 +328,11 @@ app.post('/api/ai', async (req, res) => {
         onThread: (threadId) => { if (!fastInlineTranslation) streamEvent(res, { type: 'thread', threadId }) },
       })
       content = result.content
+      generatedImages = result.images || []
       generatedFiles = captureFiles ? result.files.length ? result.files : [{ name: '生成内容.md', content: result.content }] : []
     } else {
       model = apiConfig.model
-      const historyImages = await prepareHistoryImages()
-      const historyMessages = safeHistory.map(({ role, content, attachmentIds }) => {
-        const images = role === 'user' && Array.isArray(attachmentIds) ? attachmentIds.flatMap((id) => historyImages.has(id) ? [{ type: 'image_url', image_url: { url: historyImages.get(id), detail: 'high' } }] : []) : []
-        return { role, content: images.length ? [{ type: 'text', text: stripCitationTags(String(content)) }, ...images] : stripCitationTags(String(content)) }
-      })
+      const historyMessages = safeHistory.map(({ role, content }) => ({ role, content: stripCitationTags(String(content)) }))
       content = await streamChatCompletions({
         ...apiConfig,
         messages: [
@@ -374,7 +348,7 @@ app.post('/api/ai', async (req, res) => {
     if (!generatedFiles.length && action === 'custom' && wantsTextFile(instruction)) generatedFiles = [{ name: '生成内容.md', content: markdownContent }]
     const groundedContent = showsCitations ? groundCitationTags(markdownContent, references) : stripCitationTags(markdownContent)
     const usedReferences = showsCitations ? referencesUsedIn(groundedContent, references) : []
-    streamEvent(res, { type: 'done', content: groundedContent, references: usedReferences, model, skillName: activeSkill?.name || '', files: generatedFiles })
+    streamEvent(res, { type: 'done', content: groundedContent, references: usedReferences, model, skillName: activeSkill?.name || '', files: generatedFiles, images: generatedImages })
     res.end()
   } catch (error) {
     if (res.destroyed || error?.name === 'AbortError') return

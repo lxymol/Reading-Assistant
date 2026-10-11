@@ -1,7 +1,7 @@
 import type { ChatMessage, ChatReference } from '../types'
 import { createStreamBatcher } from './streamBatcher.js'
 
-type AiStreamEvent = { type: 'delta'; delta: string } | { type: 'thread'; threadId: string } | { type: 'done'; content: string; references?: ChatReference[]; model?: string; skillName?: string; files?: Array<{ name: string; content: string }> } | { type: 'error'; error: string }
+type AiStreamEvent = { type: 'delta'; delta: string } | { type: 'thread'; threadId: string } | { type: 'done'; content: string; references?: ChatReference[]; model?: string; skillName?: string; files?: Array<{ name: string; content: string }>; images?: Array<{ name: string; dataUrl: string }> } | { type: 'error'; error: string }
 type AiDoneEvent = Extract<AiStreamEvent, { type: 'done' }>
 
 export const readAiStream = async (response: Response, onEvent: (event: AiStreamEvent) => void): Promise<AiDoneEvent> => {
@@ -51,7 +51,7 @@ export const readAiStream = async (response: Response, onEvent: (event: AiStream
 export const recentSelectionHistory = (messages: ChatMessage[]) => {
   return messages.slice(-40).map((message) => ({
       role: message.role,
-      content: message.role === 'user' && message.prompt && message.prompt !== message.content ? `${message.prompt}\n\n${message.content}` : message.content,
+      content: (message.role === 'user' && message.prompt && message.prompt !== message.content ? `${message.prompt}\n\n${message.content}` : message.content).replace(/!\[[^\]]*\]\(data:image\/[^)]+\)/g, '[图片已在先前回合显示]'),
       attachmentIds: message.role === 'user' ? message.attachments?.map((image) => image.id) || [] : [],
     }))
 }

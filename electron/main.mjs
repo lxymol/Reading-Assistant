@@ -404,7 +404,23 @@ const selectionImageName = (id) => {
   return `${id}.jpg`
 }
 const selectionCacheFile = (id) => path.join(selectionCachePath, selectionImageName(id))
-const selectionArchiveFile = (id, thumbnail = false) => path.join(selectionArchivePath, thumbnail ? `${id}.thumb.jpg` : selectionImageName(id))
+const selectionArchiveFile = (id, thumbnail = false) => {
+  if (/^generated-[0-9a-f-]{36}$/i.test(String(id))) return path.join(selectionArchivePath, `${id}${thumbnail ? '.thumb' : ''}.png`)
+  selectionImageName(id)
+  return path.join(selectionArchivePath, thumbnail ? `${id}.thumb.jpg` : selectionImageName(id))
+}
+
+async function storeGeneratedImage(payload) {
+  const data = Buffer.from(payload?.data || [])
+  const thumbnail = Buffer.from(payload?.thumbnail || [])
+  const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+  if (!data.length || data.length > 12 * 1024 * 1024 || !thumbnail.length || thumbnail.length > 2 * 1024 * 1024 || !data.subarray(0, 8).equals(pngSignature) || !thumbnail.subarray(0, 8).equals(pngSignature)) throw new Error('INVALID_GENERATED_IMAGE')
+  const id = `generated-${randomUUID()}`
+  await fs.promises.writeFile(selectionArchiveFile(id), data)
+  try { await fs.promises.writeFile(selectionArchiveFile(id, true), thumbnail) }
+  catch (error) { await fs.promises.rm(selectionArchiveFile(id), { force: true }); throw error }
+  return { id }
+}
 
 async function storeSelectionImage(payload) {
   if (!payload || payload.data == null || payload.mime !== 'image/jpeg') throw new Error('INVALID_SELECTION_IMAGE')
@@ -417,8 +433,8 @@ async function storeSelectionImage(payload) {
 
 async function readSelectionImage(id, thumbnail = false) {
   const archived = selectionArchiveFile(id, thumbnail)
-  const filePath = fs.existsSync(archived) ? archived : thumbnail ? archived : selectionCacheFile(id)
-  try { return { data: new Uint8Array(await fs.promises.readFile(filePath)), mime: 'image/jpeg' } } catch (error) {
+  const filePath = fs.existsSync(archived) ? archived : thumbnail || String(id).startsWith('generated-') ? archived : selectionCacheFile(id)
+  try { return { data: new Uint8Array(await fs.promises.readFile(filePath)), mime: String(id).startsWith('generated-') ? 'image/png' : 'image/jpeg' } } catch (error) {
     if (error?.code === 'ENOENT') return null
     throw error
   }
@@ -474,6 +490,7 @@ ipcMain.handle('reading-assistant:open-external', async (_event, value) => {
   return true
 })
 ipcMain.handle('reading-assistant:check-for-updates', (_event, force) => checkForUpdates(Boolean(force)))
+ipcMain.handle('reading-assistant:store-generated-image', (_event, payload) => storeGeneratedImage(payload))
 ipcMain.handle('reading-assistant:store-selection-image', (_event, payload) => storeSelectionImage(payload))
 ipcMain.handle('reading-assistant:read-selection-image', (_event, id, thumbnail) => readSelectionImage(id, Boolean(thumbnail)))
 ipcMain.handle('reading-assistant:delete-selection-images', (_event, ids) => deleteSelectionImages(ids))
@@ -503,12 +520,11 @@ function getDockZoneWindow(side) {
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
-    alwaysOnTop: true,
+    parent: mainWindow,
     hasShadow: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   })
   zoneWindow.setIgnoreMouseEvents(true)
-  zoneWindow.setAlwaysOnTop(true, 'screen-saver')
   zoneWindow.raidActive = false
   zoneWindow.raidDark = false
   zoneWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<style>html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent;contain:strict;clip-path:inset(0)}body::before{content:"";position:absolute;inset:6% 0;opacity:.5;filter:blur(9px);background:radial-gradient(ellipse at left center,rgba(55,148,255,.92),rgba(55,148,255,.34) 42%,transparent 74%);transition:opacity .1s}body.right::before{transform:scaleX(-1)}body.dark::before{background:radial-gradient(ellipse at left center,rgba(246,195,55,.9),rgba(246,195,55,.34) 42%,transparent 74%)}body.active::before{opacity:.95;filter:blur(7px)}</style><body class="${side}"></body>`)}`)
@@ -561,6 +577,13 @@ ipcMain.on('reading-assistant:move-panel-window', (event, payload) => {
   if (lockedBounds) setPanelPositionPreservingSize(panelWindow, x, y, lockedBounds)
   else panelWindow.setPosition(x, y, false)
 })
+ipcMain.handle('reading-assistant:set-panel-on-top', (event, active) => {
+  const panelWindow = getPanelWindow(event.sender)
+  if (!panelWindow) return false
+  panelWindow.setAlwaysOnTop(Boolean(active))
+  return panelWindow.isAlwaysOnTop()
+})
+
 ipcMain.on('reading-assistant:prepare-panel-drag', (event) => {
   const panelWindow = getPanelWindow(event.sender)
   if (!panelWindow || panelDragBounds.has(panelWindow)) return
@@ -630,6 +653,14 @@ async function createWindow() {
   // not use that menu, so remove it entirely while preserving renderer shortcuts.
   mainWindow.setMenu(null)
   mainWindow.setMenuBarVisibility(false)
+  mainWindow.on('minimize', () => setDockZones(false))
+  mainWindow.on('hide', () => setDockZones(false))
+  mainWindow.on('blur', () => {
+    setTimeout(() => {
+      const focused = BrowserWindow.getFocusedWindow()
+      if (focused !== mainWindow && !panelWindows.has(focused)) setDockZones(false)
+    }, 0)
+  })
   mainWindow.on('closed', () => {
     for (const panelWindow of panelWindows) if (!panelWindow.isDestroyed()) panelWindow.destroy()
     panelWindows.clear()
@@ -659,6 +690,12 @@ async function createWindow() {
   })
   mainWindow.webContents.on('did-create-window', (panelWindow) => {
     panelWindows.add(panelWindow)
+    panelWindow.on('blur', () => {
+      setTimeout(() => {
+        const focused = BrowserWindow.getFocusedWindow()
+        if (focused !== mainWindow && !panelWindows.has(focused)) setDockZones(false)
+      }, 0)
+    })
     let mainWasMinimized = false
     panelWindow.on('close', () => { mainWasMinimized = Boolean(mainWindow?.isMinimized()) })
     panelWindow.on('closed', () => {

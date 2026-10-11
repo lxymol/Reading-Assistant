@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README_zh-cn.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-2.2.0-3794ff)
+![Version](https://img.shields.io/badge/version-2.3.0-3794ff)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 Raid is a lightweight, extensible AI reader for papers, textbooks, and technical documents. It brings multi-file organization, continuous reading, precise selection, OCR, annotations, document tags, retrieval-grounded AI conversations, and user-configured models into one focused desktop workspace.
@@ -81,7 +81,7 @@ User memory is a separate, optional, editable profile for stable background and 
 
 Download the Windows installer from [GitHub Releases](https://github.com/lxymol/Reading-Assistant/releases). Raid does not modify system environment variables and does not require a separate Node.js installation.
 
-Current version: `2.2.0`.
+Current version: `2.3.0`.
 
 ## AI configuration
 
@@ -126,7 +126,7 @@ npm run test:memory
 npm run desktop:pack
 ```
 
-The Windows installer is written to `release-2.2.0`.
+The Windows installer is written to `release-2.3.0`.
 
 ## Privacy and security
 

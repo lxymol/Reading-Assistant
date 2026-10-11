@@ -19,7 +19,7 @@ const rehypePlugins = [rehypeKatex]
 // Callback changes and streaming updates to other messages must not reparse
 // completed answers, especially those containing expensive math layouts.
 const AssistantMarkdown = memo(function AssistantMarkdown({ content, references }: { content: string; references?: ChatReference[] }) {
-  return <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} urlTransform={defaultUrlTransform}>{normalizeAssistantMarkdown(content, references)}</ReactMarkdown>
+  return <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} urlTransform={(url, key) => key === 'src' && /^data:image\/(png|jpeg|webp);base64,/.test(url) ? url : defaultUrlTransform(url)} components={{ img: ({ src, alt }) => <img src={src} alt={alt || 'AI 图片'} loading="lazy" /> }}>{normalizeAssistantMarkdown(content, references)}</ReactMarkdown>
 })
 
 function CopyMessageButton({ content, copyLabel, copiedLabel }: { content: string; copyLabel: string; copiedLabel: string }) {
@@ -96,9 +96,10 @@ function SelectionAttachment({ id, page }: { id: string; page: number }) {
       else URL.revokeObjectURL(url)
     } catch { /* The image may have been removed. */ }
   }
+  const label = page ? `第 ${page} 页选区图片` : 'AI 生成图片'
   return <>
-    <button ref={buttonRef} className="conversation-selection-thumb" onClick={() => void open()} title={`查看第 ${page} 页选区图片`}>{thumbnail ? <img src={thumbnail} alt={`第 ${page} 页选区`} /> : <span>P{page}</span>}</button>
-    {full && createPortal(<div className="selection-image-viewer" role="dialog" aria-modal="true" aria-label={`第 ${page} 页选区图片`} onClick={() => setFull('')}><button title="关闭" onClick={() => setFull('')}><X size={18} /></button><img src={full} alt={`第 ${page} 页选区图片`} onClick={(event) => event.stopPropagation()} /></div>, portalBody || document.body)}
+    <button ref={buttonRef} className="conversation-selection-thumb" onClick={() => void open()} title={`查看${label}`}>{thumbnail ? <img src={thumbnail} alt={label} /> : <span>{page ? `P${page}` : 'AI'}</span>}</button>
+    {full && createPortal(<div className="selection-image-viewer" role="dialog" aria-modal="true" aria-label={label} onClick={() => setFull('')}><button title="关闭" onClick={() => setFull('')}><X size={18} /></button><img src={full} alt={label} onClick={(event) => event.stopPropagation()} /></div>, portalBody || document.body)}
   </>
 }
 
@@ -123,6 +124,7 @@ export default function ConversationMessages({ history, deleteMessage, openRefer
           ? <div className="user-event" key={message.id}><span>{message.prompt || message.label}</span>{message.content !== message.prompt && <small>{message.content.slice(0, 120)}{message.content.length > 120 ? '…' : ''}</small>}{Boolean(message.attachments?.length) && <div className="conversation-attachments">{message.attachments?.map((image) => <SelectionAttachment key={image.id} id={image.id} page={image.page} />)}</div>}<button className="delete-message" onClick={() => deleteMessage(message.id)}><X size={12} /></button></div>
           : <article className="answer-card" key={message.id}>
               <div className="answer-actions"><CopyMessageButton content={message.content} copyLabel={t('copy')} copiedLabel={t('copied')} /><button onClick={() => deleteMessage(message.id)}><X size={14} /></button></div>
+              {Boolean(message.attachments?.length) && <div className="conversation-attachments generated-images">{message.attachments?.map((image) => <SelectionAttachment key={image.id} id={image.id} page={0} />)}</div>}
               <div className="markdown" onClick={(event) => {
                 const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#raid-reference-"]')
                 if (!link) return

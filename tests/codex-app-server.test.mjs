@@ -137,3 +137,42 @@ test('Codex child process stops when idle but remains alive during a turn', asyn
     codexAppServer.activeTurns = originalActiveTurns
   }
 })
+
+
+test('Codex captures image-only results once and sends only new selection images', async () => {
+  const originalAccount = codexAppServer.account
+  const originalRequest = codexAppServer.request
+  const calls = []
+  const image = { type: 'imageGeneration', id: 'generated-image', status: 'completed', result: 'iVBORw0KGgo=' }
+  try {
+    codexAppServer.account = async () => ({ type: 'chatgpt' })
+    codexAppServer.request = async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'config/read') return { config: {} }
+      if (method === 'thread/start') return { thread: { id: 'image-thread' } }
+      if (method === 'thread/resume') throw new Error('Session expired')
+      if (method === 'turn/start') {
+        setTimeout(() => {
+          for (const listener of codexAppServer.listeners) {
+            listener('item/completed', { threadId: 'image-thread', item: image })
+            listener('turn/completed', { threadId: 'image-thread', turn: { id: 'image-turn', status: 'completed', items: [image] } })
+          }
+        }, 0)
+        return { turn: { id: 'image-turn' } }
+      }
+      throw new Error(`Unexpected method ${method}`)
+    }
+    const result = await codexAppServer.complete({ prompt: 'Draw this', images: ['data:image/png;base64,NEW'], initialContext: 'Previous image discussed in text', threadId: 'expired-thread', prepareHistoryImages: () => { throw new Error('Old images must not be reread') } })
+    assert.equal(result.content, '')
+    assert.equal(result.images.length, 1)
+    assert.equal(result.images[0].dataUrl, 'data:image/png;base64,iVBORw0KGgo=')
+    const input = calls.find(call => call.method === 'turn/start').params.input
+    assert.match(input[0].text, /Previous image discussed in text/)
+    assert.deepEqual(input.slice(1), [{ type: 'image', url: 'data:image/png;base64,NEW', detail: 'high' }])
+  } finally {
+    codexAppServer.account = originalAccount
+    codexAppServer.request = originalRequest
+    codexAppServer.listeners.clear()
+    codexAppServer.toolHandlers.clear()
+  }
+})

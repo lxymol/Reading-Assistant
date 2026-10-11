@@ -40,7 +40,7 @@ test('AI route sends ordinary multimodal prompts and complete multi-file attachm
   assert.equal(events.at(-1).content, 'Final answer')
   const request = requests[0]
   assert.equal(request.messages.at(-1).content[1].image_url.url, image)
-  assert.equal(request.messages[1].content[1].type, 'image_url', 'Follow-ups lost their earlier image input')
+  assert.equal(request.messages[1].content, 'Earlier question', 'Historical images must never be resubmitted')
   assert.equal(request.messages.at(-1).content[0].text, 'What does this mean?\n\n<selected_text>\nSelected text\n</selected_text>')
   assert.equal('temperature' in request, false)
   assert.equal(requests.length, 1, 'An unrequested skill changed the ordinary conversation')
@@ -60,7 +60,7 @@ test('AI route sends ordinary multimodal prompts and complete multi-file attachm
   assert.match((await response.json()).error, /未截断/)
   assert.equal(requests.length, 2, 'Oversized full text must not be silently truncated and submitted')
   await send({ instruction: 'Explain the earlier image again.', history: [{ role: 'user', content: 'Earlier figure', attachmentIds: ['stored'] }], aiConfig: { ...aiConfig, visionEnabled: true, visionModel: 'vision-model' } })
-  assert.equal(requests.at(-1).model, 'vision-model', 'Image follow-ups must use the configured vision model')
-  assert.ok(requests.at(-1).messages[1].content.some((part) => part.type === 'image_url'))
+  assert.equal(requests.at(-1).model, 'test-model', 'Text follow-ups must not use the vision model for historical images')
+  assert.equal(requests.at(-1).messages[1].content, 'Earlier figure')
 
 })
